@@ -61,6 +61,14 @@ appears in the repo root. Spot-check that `duration` and `word_count` look
 sane and that a few `words` timestamps line up with what's said. Use
 `--output` to write elsewhere. Only transcribe content you have the rights to.
 
+To transcribe just a slice of a long video, add `--start` / `--end` (`SS`,
+`MM:SS`, or `HH:MM:SS`); word timestamps are still written in absolute source
+time, and a `range` field records the window:
+
+```bash
+venv\Scripts\python.exe transcribe.py --input path\to\video.mp4 --start 5:00 --end 12:30
+```
+
 ### Phase 3 — cut + 9:16 reframe
 Cuts a `[--start, --end]` segment (seconds), reframes it to a vertical
 1080x1920 (9:16) frame, and encodes with the GPU (`h264_nvenc`) to `/output`.
@@ -250,6 +258,7 @@ is transcribed).
 | `--min` / `--max` | 20 / 90 | candidate window length bounds (s) |
 | `--overlap` | 0.5 | max overlap between chosen clips (`1.0` disables dedup) |
 | `--energy-weight` | 0.3 | audio-energy share when re-ranking (`0` = pure LLM order); see Phase 5 |
+| `--start` / `--end` | — | only clip this time window of the source (`SS`, `MM:SS`, or `HH:MM:SS`); transcribes just the window so a long video needn't be done in full |
 | `--transcript` | — | reuse an existing `transcript.json` (single input only) |
 
 ### Phase 5 — audio-energy re-ranking
@@ -309,6 +318,11 @@ venv\Scripts\python.exe serve.py
   reframe → caption) as a subprocess and streams its output to the page. A URL
   is downloaded first (yt-dlp). Set how many clips with the **clips** field and
   tick **caption suggestions** for the `--suggest` metadata.
+- **only clip from / to** (optional) restricts the run to a time window of the
+  source — enter `5:00` / `12:30` (or plain seconds). Only that window is
+  transcribed, so a long video (a 2-hour stream, say) is fast instead of having
+  to transcribe the whole thing. Leave both blank for the entire video. The
+  clips are still cut at their true positions in the full source.
 - When it finishes, the new clips appear under **Pick your clips** with a
   checkbox on each — tick the ones you want and **Download selected**, or grab
   them individually. Reload to fold them into the gallery below.

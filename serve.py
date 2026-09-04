@@ -153,11 +153,16 @@ def _clips_from_log(log_lines: list, clips_dir: str) -> list:
     return out
 
 
-def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str):
+def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
+             start: str = "", end: str = ""):
     """Run main.py as a subprocess, streaming its output into JOB['log']."""
     args = [sys.executable, "main.py", "--input", input_value, "--n", str(n)]
     if suggest:
         args.append("--suggest")
+    if start:
+        args += ["--start", start]
+    if end:
+        args += ["--end", end]
     JOB["log"].append("$ " + " ".join(args[1:]))
     try:
         proc = subprocess.Popen(
@@ -181,13 +186,15 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str):
         JOB["status"] = "error"
 
 
-def start_job(input_value: str, n: int, suggest: bool, clips_dir: str) -> bool:
+def start_job(input_value: str, n: int, suggest: bool, clips_dir: str,
+              start: str = "", end: str = "") -> bool:
     """Start a clip job if none is running. Returns False if one already is."""
     with _JOB_LOCK:
         if JOB["status"] == "running":
             return False
         JOB.update(status="running", input=input_value, n=n, log=[], clips=[])
-    threading.Thread(target=_run_job, args=(input_value, n, suggest, clips_dir),
+    threading.Thread(target=_run_job,
+                     args=(input_value, n, suggest, clips_dir, start, end),
                      daemon=True).start()
     return True
 
@@ -258,6 +265,8 @@ def render_page(clips_dir: str) -> bytes:
     background:#0b0d11; border:1px solid var(--line); border-radius:8px; color:var(--text); }}
   .create input[type=number] {{ width:70px; padding:10px; background:#0b0d11;
     border:1px solid var(--line); border-radius:8px; color:var(--text); }}
+  .create input.time {{ width:120px; padding:8px 10px; background:#0b0d11;
+    border:1px solid var(--line); border-radius:8px; color:var(--text); }}
   .create label.opt {{ color:var(--dim); display:flex; align-items:center; gap:6px; }}
   button {{ padding:10px 18px; font-size:14px; font-weight:600; border:0; border-radius:8px;
     background:var(--accent); color:#0b0d11; cursor:pointer; }}
@@ -312,6 +321,13 @@ def render_page(clips_dir: str) -> bytes:
       <label class="opt">clips <input type="number" id="n" min="1" max="20" value="5"></label>
       <label class="opt"><input type="checkbox" id="suggest"> caption suggestions</label>
       <button id="go">Clip</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label class="opt">only clip
+        <input type="text" id="start" class="time" placeholder="from (e.g. 5:00)"></label>
+      <label class="opt">→
+        <input type="text" id="end" class="time" placeholder="to (e.g. 12:30)"></label>
+      <span class="hint" style="margin:0">optional — leave blank for the whole video; transcribes just this window so a long video is fast</span>
     </div>
     <div class="hint">Runs transcribe → score → reframe → caption locally, then lets you pick the best clips below. A URL is downloaded first (yt-dlp). Only clip content you have the rights to.</div>
     <div class="job" id="job" hidden>
@@ -399,7 +415,8 @@ go.onclick = async () => {{
   statusEl.style.color = ''; statusEl.textContent = 'Starting…';
   logEl.textContent = ''; $('#results').innerHTML = '';
   const res = await fetch('/clip', {{ method:'POST', headers:{{'Content-Type':'application/json'}},
-    body: JSON.stringify({{ input, n: +$('#n').value || 5, suggest: $('#suggest').checked }}) }});
+    body: JSON.stringify({{ input, n: +$('#n').value || 5, suggest: $('#suggest').checked,
+      start: $('#start').value.trim(), end: $('#end').value.trim() }}) }});
   if (res.status === 409) {{ statusEl.textContent = 'A job is already running.'; return; }}
   timer = setInterval(poll, 1000); poll();
 }};
@@ -473,7 +490,10 @@ class ClipHandler(BaseHTTPRequestHandler):
             n = max(1, min(20, int(data.get("n", 5))))
         except (TypeError, ValueError):
             n = 5
-        ok = start_job(input_value, n, bool(data.get("suggest")), self.server.clips_dir)
+        start = str(data.get("start", "")).strip()
+        end = str(data.get("end", "")).strip()
+        ok = start_job(input_value, n, bool(data.get("suggest")),
+                       self.server.clips_dir, start, end)
         if not ok:
             self._send(409, "application/json", b'{"error":"a job is already running"}')
         else:

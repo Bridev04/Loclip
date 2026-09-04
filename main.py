@@ -26,7 +26,7 @@ import os
 import re
 import sys
 
-from transcribe import transcribe, OUTPUT as TRANSCRIPT_OUT, _fmt_hms
+from transcribe import transcribe, OUTPUT as TRANSCRIPT_OUT, _fmt_hms, parse_hms
 from segments import generate_segments
 from score import score_segments, select_top_distinct, DEFAULT_MODEL
 from energy import compute_energies, blend_scores, DEFAULT_ENERGY_WEIGHT
@@ -53,10 +53,11 @@ def _gather_inputs(input_path: str) -> list:
     return [input_path]
 
 
-def _transcribe_and_save(input_path: str) -> dict:
+def _transcribe_and_save(input_path: str, start: float = None,
+                         end: float = None) -> dict:
     """Transcribe input and persist transcript.json; return the result dict."""
     print("== Transcribing ==", flush=True)
-    result = transcribe(input_path)
+    result = transcribe(input_path, start=start, end=end)
     with open(TRANSCRIPT_OUT, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(
@@ -84,7 +85,8 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  max_len: float = None, overlap: float = 0.5,
                  transcript_path: str = None, captions: bool = True,
                  reframe: bool = True, suggest: bool = False,
-                 energy_weight: float = DEFAULT_ENERGY_WEIGHT) -> list:
+                 energy_weight: float = DEFAULT_ENERGY_WEIGHT,
+                 start: float = None, end: float = None) -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
@@ -102,7 +104,7 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
         with open(transcript_path, encoding="utf-8") as f:
             result = json.load(f)
     else:
-        result = _transcribe_and_save(input_path)
+        result = _transcribe_and_save(input_path, start=start, end=end)
     local_path = result["input"]
 
     print("\n== Generating candidate segments ==", flush=True)
@@ -212,6 +214,11 @@ def main():
     ap.add_argument("--energy-weight", type=float, default=DEFAULT_ENERGY_WEIGHT,
                     help="audio-energy share when re-ranking, 0..1 "
                          f"(default {DEFAULT_ENERGY_WEIGHT:g}; 0 = pure LLM order)")
+    ap.add_argument("--start", type=parse_hms, default=None,
+                    help="only clip from this time of the source (seconds or MM:SS / HH:MM:SS); "
+                         "transcribes just this window so a long video needn't be done in full")
+    ap.add_argument("--end", type=parse_hms, default=None,
+                    help="only clip up to this time of the source (seconds or MM:SS / HH:MM:SS)")
     args = ap.parse_args()
 
     if args.dumb and args.n is not None:
@@ -225,6 +232,12 @@ def main():
         print("ERROR: pass --input (video/URL/folder), or --transcript to reuse an existing one.",
               file=sys.stderr)
         sys.exit(2)
+    if args.start is not None and args.end is not None and args.end <= args.start:
+        print("ERROR: --end must be greater than --start.", file=sys.stderr)
+        sys.exit(2)
+    if (args.start is not None or args.end is not None) and args.transcript:
+        print("Note: --start/--end are ignored when reusing --transcript "
+              "(the transcript already fixes the range).", flush=True)
 
     try:
         inputs = _gather_inputs(args.input)
@@ -252,7 +265,7 @@ def main():
                 outs = run_pipeline(inp, args.n, args.fit, args.model,
                                     args.min, args.max, args.overlap, transcript,
                                     args.captions, args.reframe, args.suggest,
-                                    args.energy_weight)
+                                    args.energy_weight, args.start, args.end)
             all_outs.extend(outs)
         except Exception as e:
             msg = f"{inp}: {type(e).__name__}: {e}"
