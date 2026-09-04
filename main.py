@@ -89,7 +89,8 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  energy_weight: float = DEFAULT_ENERGY_WEIGHT,
                  start: float = None, end: float = None,
                  layout: str = None, facecam: str = None,
-                 facecam_frac: float = 0.4, batch_size: int = BATCH_SIZE) -> list:
+                 facecam_frac: float = 0.4, batch_size: int = BATCH_SIZE,
+                 loudnorm: bool = True) -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
@@ -169,7 +170,8 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
         out = cut_segment(local_path, start=r["start"], end=r["end"], fit=fit,
                           out_path=out_path, captions=captions, words=words,
                           style=style, reframe=reframe, layout=layout,
-                          facecam=facecam, facecam_frac=facecam_frac)
+                          facecam=facecam, facecam_frac=facecam_frac,
+                          loudnorm=loudnorm)
         outs.append(out)
         if suggest:
             _write_suggestion(out, text_by_id.get(r["id"], ""))
@@ -222,6 +224,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=BATCH_SIZE,
                     help=f"transcription batch size (default {BATCH_SIZE}; lower if you hit "
                          f"GPU out-of-memory, 1 = sequential)")
+    ap.add_argument("--no-loudnorm", dest="loudnorm", action="store_false",
+                    help="skip audio loudness normalization (on by default, ~-14 LUFS)")
     ap.add_argument("--captions", dest="captions", action="store_true", default=True,
                     help="burn TikTok-style captions into each clip (default on)")
     ap.add_argument("--no-captions", dest="captions", action="store_false",
@@ -284,7 +288,7 @@ def main():
                                     args.captions, args.reframe, args.suggest,
                                     args.energy_weight, args.start, args.end,
                                     args.layout, args.facecam, args.facecam_frac,
-                                    args.batch_size)
+                                    args.batch_size, args.loudnorm)
             all_outs.extend(outs)
         except Exception as e:
             msg = f"{inp}: {type(e).__name__}: {e}"

@@ -80,7 +80,7 @@ def cut_segment(input_path: str, start: float, end: float,
                 words: list = None, style: dict = None,
                 reframe: bool = False, reframe_cfg: dict = None,
                 layout: str = None, facecam: str = None,
-                facecam_frac: float = 0.4) -> str:
+                facecam_frac: float = 0.4, loudnorm: bool = True) -> str:
     """Resolve input, cut [start, end], reframe to 9:16, encode to out_path.
 
     When layout="split", the clip becomes a streamer-style vertical: the facecam
@@ -182,6 +182,10 @@ def cut_segment(input_path: str, start: float, end: float,
         cmd += ["-filter_complex", complex_graph, "-map", final_label, "-map", "0:a?"]
     else:
         cmd += ["-vf", base_vf]
+    # Normalize loudness to the social-standard ~-14 LUFS so clips don't swing
+    # between quiet and blaring. Single-pass loudnorm is plenty for short clips.
+    if loudnorm:
+        cmd += ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
     cmd += [
         "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0",
         "-pix_fmt", "yuv420p",
@@ -228,6 +232,8 @@ def main():
                          "or a corner (top-left/tr/bottom-right/...); omit to auto-detect")
     ap.add_argument("--facecam-frac", type=float, default=0.4,
                     help="top share of the frame for the facecam in split layout (default 0.4)")
+    ap.add_argument("--no-loudnorm", dest="loudnorm", action="store_false",
+                    help="skip audio loudness normalization (on by default, ~-14 LUFS)")
     ap.add_argument("--captions", action="store_true",
                     help="burn TikTok-style captions in (needs --transcript for word timestamps)")
     ap.add_argument("--transcript", default=None,
@@ -250,7 +256,8 @@ def main():
                           args.output_dir, args.output,
                           captions=args.captions, words=words, style=style,
                           reframe=args.reframe, layout=args.layout,
-                          facecam=args.facecam, facecam_frac=args.facecam_frac)
+                          facecam=args.facecam, facecam_frac=args.facecam_frac,
+                          loudnorm=args.loudnorm)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

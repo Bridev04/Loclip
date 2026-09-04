@@ -299,6 +299,7 @@ is transcribed).
 | `--facecam-frac` | 0.4 | top share of the frame for the facecam with `--split` |
 | `--batch-size` | 8 | transcription batch size (lower on GPU OOM; `1` = sequential) |
 | `--captions` / `--no-captions` | on | burn TikTok-style captions in vs. skip |
+| `--no-loudnorm` | on | audio loudness normalization to ~-14 LUFS (on by default) |
 | `--fit cover\|contain` | cover | static-crop mode (ignored when reframe is on) |
 | `--model` | `claude-haiku-4-5` | Claude model id for scoring |
 | `--min` / `--max` | 20 / 90 | candidate window length bounds (s) |
