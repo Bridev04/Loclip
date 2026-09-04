@@ -529,8 +529,8 @@ class ClipHandler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass  # browser aborted the stream (seek / tab close) -- fine.
 
 
 def serve(clips_dir: str, port: int, open_browser: bool):
