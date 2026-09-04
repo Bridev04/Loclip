@@ -8,9 +8,10 @@ social media manually.
 
 ## My machine
 - OS: Windows 11
-- GPU: NVIDIA RTX 5060 Laptop, 8GB GDDR7 VRAM, Blackwell architecture (sm_120)
-- CUDA 12.8+ and recent PyTorch required (Blackwell needs current builds;
-  old pinned versions cause "no kernel image available" errors)
+- GPU: NVIDIA GeForce RTX 4060 Laptop GPU, 8GB GDDR6 VRAM, Ada Lovelace architecture (sm_89)
+- Python 3.12
+- Standard current CUDA PyTorch works out of the box (Ada is well-supported;
+  no Blackwell/sm_120 workaround needed). Installed via the cu124 wheel index.
 
 ## Division of labor (important)
 - GPU does PERCEPTION: transcription, face detection, video encoding.

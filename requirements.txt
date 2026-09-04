@@ -1,0 +1,11 @@
+# Local Clipper dependencies
+# torch/torchaudio are installed from the CUDA wheel index, not PyPI:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+torch
+torchaudio
+faster-whisper
+ffmpeg-python
+anthropic
+python-dotenv
+librosa
+mediapipe
