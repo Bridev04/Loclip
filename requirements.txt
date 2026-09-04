@@ -9,4 +9,7 @@ anthropic
 python-dotenv
 librosa
 mediapipe
+# Phase 6 face-tracking reframe (YuNet via cv2.FaceDetectorYN):
+opencv-contrib-python
+numpy
 yt-dlp

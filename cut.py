@@ -77,8 +77,14 @@ def _ass_filter_path(ass_path: str) -> str:
 def cut_segment(input_path: str, start: float, end: float,
                 fit: str = "cover", output_dir: str = OUTPUT_DIR,
                 out_path: str = None, captions: bool = False,
-                words: list = None, style: dict = None) -> str:
+                words: list = None, style: dict = None,
+                reframe: bool = False, reframe_cfg: dict = None) -> str:
     """Resolve input, cut [start, end], reframe to 9:16, encode to out_path.
+
+    When reframe=True, a face-tracking dynamic crop follows the main speaker
+    (see reframe.py) instead of the static `fit` crop; it falls back to the
+    static center-crop when no/too-few faces are detected. --reframe overrides
+    --fit (it always produces a cover-style vertical crop).
 
     When captions=True, an ASS caption file is generated from `words` (a list of
     {start, end, word} spanning the source video) and burned into the clip.
@@ -111,9 +117,19 @@ def cut_segment(input_path: str, start: float, end: float,
         if parent:
             os.makedirs(parent, exist_ok=True)
 
-    # Build the video filter chain. Captions come LAST so the ass filter draws
-    # onto the finished 1080x1920 frame (crop/scale already applied).
-    vf = FILTERS[fit]
+    # Build the video filter chain. Reframe (dynamic face-tracking crop) or the
+    # static `fit` crop produce the 1080x1920 frame; captions come LAST so the
+    # ass filter draws onto the finished frame.
+    base_vf = None
+    if reframe:
+        from reframe import build_reframe_vf  # lazy: pulls in cv2/numpy
+        base_vf = build_reframe_vf(local_path, start, end, TARGET_W, TARGET_H,
+                                   reframe_cfg)
+        if base_vf is None:
+            print("Reframe: no/too-few faces detected -> static center crop.", flush=True)
+    if base_vf is None:
+        base_vf = FILTERS[fit]
+    vf = base_vf
     ass_path = None
     if captions:
         if not words:
@@ -142,7 +158,8 @@ def cut_segment(input_path: str, start: float, end: float,
     ]
 
     print(
-        f"Cutting {start:g}s -> {end:g}s ({duration:g}s), reframe={fit}, "
+        f"Cutting {start:g}s -> {end:g}s ({duration:g}s), "
+        f"reframe={'on' if reframe else 'off'}, fit={fit}, "
         f"captions={'on' if captions else 'off'}, "
         f"encoding {TARGET_W}x{TARGET_H} h264_nvenc ...",
         flush=True,
@@ -170,6 +187,8 @@ def main():
                     help="cover = fill+crop (default), contain = fit+pad")
     ap.add_argument("--output-dir", default=OUTPUT_DIR, help="where to write the clip")
     ap.add_argument("--output", default=None, help="explicit output file path (overrides --output-dir)")
+    ap.add_argument("--reframe", action="store_true",
+                    help="face-tracking dynamic crop that follows the speaker (overrides --fit)")
     ap.add_argument("--captions", action="store_true",
                     help="burn TikTok-style captions in (needs --transcript for word timestamps)")
     ap.add_argument("--transcript", default=None,
@@ -190,7 +209,8 @@ def main():
     try:
         out = cut_segment(args.input, args.start, args.end, args.fit,
                           args.output_dir, args.output,
-                          captions=args.captions, words=words, style=style)
+                          captions=args.captions, words=words, style=style,
+                          reframe=args.reframe)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

@@ -21,6 +21,11 @@ Also required:
   ```
   ANTHROPIC_API_KEY=sk-ant-...
   ```
+- The **YuNet face-detection model** for Phase 6 reframe (one-time, ~230 KB, into
+  `models/`, which is gitignored):
+  ```bash
+  curl -L -o models/face_detection_yunet_2023mar.onnx https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+  ```
 
 ## Manual tests
 
@@ -106,7 +111,9 @@ not the code**, then re-run. Useful flags:
 - `--transcript transcript.json` — reuse an existing transcript instead of
   re-transcribing, so you can iterate on scoring/selection fast (no `--input`
   needed). The video path is read from the transcript.
-- `--fit contain` — letterbox instead of crop.
+- `--fit contain` — letterbox instead of crop (ignored when reframe is on).
+- `--no-reframe` — static center crop instead of speaker face-tracking (tracking
+  is on by default; see Phase 6).
 - `--no-captions` — skip the caption burn-in (captions are on by default; see
   Phase 7).
 
@@ -118,6 +125,44 @@ venv\Scripts\python.exe score.py                    # print the ranked segments
 
 > Needs `ANTHROPIC_API_KEY` in `.env`. A run costs a fraction of a cent (Haiku).
 > If the model returns malformed JSON, the scorer reports it instead of crashing.
+
+### Phase 6 — face-tracking auto-reframe
+`reframe.py` keeps the speaker in frame when cropping 16:9 → 9:16. It samples
+face detections across the clip (OpenCV's **YuNet**, run locally), picks the
+main speaker (largest face, with hysteresis so it doesn't flip between people),
+and builds a **smoothed** crop-center path — moving-average + a pan-speed limiter
++ path simplification — so the vertical frame glides to follow them with no
+jitter. `cut.py` applies it as a dynamic ffmpeg `crop` before the scale (and
+before captions). If no face (or too few) is detected it **falls back to the
+static center-crop**. Reframe is **on by default** in the `--n` pipeline:
+
+```bash
+venv\Scripts\python.exe main.py --transcript transcript.json --n 5
+# static center crop instead:
+venv\Scripts\python.exe main.py --transcript transcript.json --n 5 --no-reframe
+```
+
+Verify tracking on one window (encodes a real clip; scrub it — the crop should
+follow the speaker smoothly and never jump):
+
+```bash
+venv\Scripts\python.exe reframe.py --input media\2PxLYWjgLys.mp4 --start 53.24 --end 76.4 --output output\reframe_test.mp4
+```
+
+Inspect the detection track without encoding (how many samples saw a face, the
+crop-x range, or whether it would fall back to a static crop):
+
+```bash
+venv\Scripts\python.exe reframe.py --input media\2PxLYWjgLys.mp4 --start 53.24 --end 76.4 --dump
+```
+
+Tuning flags (standalone `reframe.py`): `--sample-fps` (detection rate, default
+6), `--smooth-seconds` (path smoothing window, default 0.8), `--max-pan-px-s`
+(max crop pan speed, default 320). Needs the YuNet model in `models/` (see
+Setup). Requires a landscape (wider-than-9:16) source; taller sources skip
+tracking and use the static crop. **Known limitation:** on hard scene cuts the
+crop slides to the new speaker over ~1s rather than jumping instantly — a
+deliberate trade for smoothness; scene-cut-aware snapping is a future refinement.
 
 ### Phase 7 — caption burn-in (TikTok/Reels style)
 `captions.py` turns the word timestamps in `transcript.json` into an ASS
