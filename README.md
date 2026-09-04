@@ -95,10 +95,17 @@ venv\Scripts\python.exe main.py --input path\to\video.mp4 --n 5
 ```
 
 Clips land in `/output` named `<stem>_rank01_score87_<start>-<end>.mp4` (rank +
-score in the filename so the best sort first). Inspect the top picks; **tune by
-editing `prompts/score.txt`, not the code**, then re-run. Useful flags:
+score in the filename so the best sort first). The top N are chosen with greedy
+overlap suppression, so they're N *distinct* moments rather than several cuts of
+the same hot moment. Inspect the top picks; **tune by editing `prompts/score.txt`,
+not the code**, then re-run. Useful flags:
 - `--model claude-sonnet-5` — score with Sonnet instead of Haiku for hard cases.
 - `--min` / `--max` — candidate window length bounds in seconds (default 20/90).
+- `--overlap 0.2` — max overlap allowed between chosen clips (default 0.5; `1.0`
+  disables dedup for pure top-N).
+- `--transcript transcript.json` — reuse an existing transcript instead of
+  re-transcribing, so you can iterate on scoring/selection fast (no `--input`
+  needed). The video path is read from the transcript.
 - `--fit contain` — letterbox instead of crop.
 
 Score or segment on their own (both read `transcript.json`, no re-transcribe):

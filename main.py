@@ -19,7 +19,7 @@ import sys
 
 from transcribe import transcribe, OUTPUT as TRANSCRIPT_OUT, _fmt_hms
 from segments import generate_segments
-from score import score_segments, DEFAULT_MODEL
+from score import score_segments, select_top_distinct, DEFAULT_MODEL
 from cut import cut_segment, OUTPUT_DIR, _safe_stem
 
 DUMB_CLIP_SECONDS = 45.0
@@ -53,9 +53,20 @@ def run_dumb(input_path: str, fit: str = "cover") -> list:
 
 def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  model: str = DEFAULT_MODEL, min_len: float = None,
-                 max_len: float = None) -> list:
-    """Full pipeline: transcribe -> segment -> score -> cut top N clips."""
-    result = _transcribe_and_save(input_path)
+                 max_len: float = None, overlap: float = 0.5,
+                 transcript_path: str = None) -> list:
+    """Full pipeline: transcribe -> segment -> score -> cut top N clips.
+
+    If transcript_path is given, that transcript is reused instead of
+    re-transcribing -- the fast loop for tuning scoring/selection on a video
+    you've already transcribed.
+    """
+    if transcript_path:
+        print(f"== Reusing transcript {transcript_path} ==", flush=True)
+        with open(transcript_path, encoding="utf-8") as f:
+            result = json.load(f)
+    else:
+        result = _transcribe_and_save(input_path)
     local_path = result["input"]
 
     print("\n== Generating candidate segments ==", flush=True)
@@ -71,8 +82,10 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
 
     print(f"\n== Scoring with {model} ==", flush=True)
     ranked = score_segments(candidates, model)
-    top = ranked[:n]
-    print("Top picks:", flush=True)
+    # Greedy overlap suppression so the top N are distinct moments, not several
+    # cuts of the same hot moment. --overlap 1.0 disables it (pure top-N).
+    top = select_top_distinct(ranked, n, overlap)
+    print(f"Top picks (from {len(ranked)} scored, overlap<={overlap:g}):", flush=True)
     for i, r in enumerate(top, 1):
         print(f"  #{i}  score {r['score']:>3}  {r['start']:>7.2f}-{r['end']:>7.2f}s  {r['reason']}",
               flush=True)
@@ -91,7 +104,7 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
 
 def main():
     ap = argparse.ArgumentParser(description="Local Clipper pipeline")
-    ap.add_argument("--input", required=True, help="local video path or a video URL (e.g. YouTube)")
+    ap.add_argument("--input", default=None, help="local video path or a video URL (e.g. YouTube)")
     ap.add_argument("--n", type=int, default=None,
                     help="cut the top N scored clips (full pipeline)")
     ap.add_argument("--dumb", action="store_true",
@@ -101,6 +114,10 @@ def main():
     ap.add_argument("--model", default=DEFAULT_MODEL, help="Claude model id for scoring")
     ap.add_argument("--min", type=float, default=None, help="min candidate window length (s)")
     ap.add_argument("--max", type=float, default=None, help="max candidate window length (s)")
+    ap.add_argument("--overlap", type=float, default=0.5,
+                    help="max allowed overlap between chosen clips, 0..1 (1.0 = disable dedup)")
+    ap.add_argument("--transcript", default=None,
+                    help="reuse this transcript.json instead of re-transcribing (--n only)")
     args = ap.parse_args()
 
     if args.dumb and args.n is not None:
@@ -110,13 +127,17 @@ def main():
         print("ERROR: no mode selected. Pass --n N for the full pipeline, or --dumb.",
               file=sys.stderr)
         sys.exit(2)
+    if not args.input and not args.transcript:
+        print("ERROR: pass --input (video/URL), or --transcript to reuse an existing one.",
+              file=sys.stderr)
+        sys.exit(2)
 
     try:
         if args.dumb:
             outs = run_dumb(args.input, args.fit)
         else:
             outs = run_pipeline(args.input, args.n, args.fit, args.model,
-                                args.min, args.max)
+                                args.min, args.max, args.overlap, args.transcript)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

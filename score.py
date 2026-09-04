@@ -135,6 +135,36 @@ def score_segments(candidates: list, model: str = DEFAULT_MODEL,
     return scored
 
 
+def _overlap_frac(a: dict, b: dict) -> float:
+    """Fraction of the SHORTER segment covered by the other (0..1).
+
+    Using intersection / min(length) instead of IoU so a short window fully
+    nested inside a longer one counts as ~1.0 overlap (IoU would under-report
+    it). That's exactly the near-duplicate case we want to catch.
+    """
+    inter = max(0.0, min(a["end"], b["end"]) - max(a["start"], b["start"]))
+    if inter <= 0:
+        return 0.0
+    shorter = min(a["end"] - a["start"], b["end"] - b["start"])
+    return inter / shorter if shorter > 0 else 0.0
+
+
+def select_top_distinct(ranked: list, n: int, overlap_thresh: float = 0.5) -> list:
+    """Greedy non-max suppression: take the best clips that don't overlap.
+
+    Walks the already-ranked list best-first and skips any candidate that
+    overlaps an already-chosen clip by more than overlap_thresh, so the top N
+    are N *distinct* moments rather than several cuts of the same hot moment.
+    """
+    chosen = []
+    for seg in ranked:
+        if all(_overlap_frac(seg, c) <= overlap_thresh for c in chosen):
+            chosen.append(seg)
+            if len(chosen) >= n:
+                break
+    return chosen
+
+
 def main():
     ap = argparse.ArgumentParser(description="Score candidate segments with Claude (ranked best-first)")
     ap.add_argument("--transcript", default="transcript.json", help="path to transcript.json")
