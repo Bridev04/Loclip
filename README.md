@@ -294,6 +294,28 @@ venv\Scripts\python.exe energy.py --input media\j2rszuZ-9PY.mp4
 It prints every candidate sorted by energy (highest first). Spot-check that
 laugh/applause/emphatic moments score high and flat, quiet passages score low.
 
+### Reviewing clips — local gallery
+`serve.py` is a small, **local, read-only** web page for eyeballing the clips in
+`/output` after a run. Each clip gets a 9:16 player; its rank/score/time-range
+are parsed from the filename, and the `--suggest` caption (if the sibling `.txt`
+exists) shows under "suggested caption". Stdlib only — no extra dependency — and
+it binds `127.0.0.1` (local machine only; no accounts, uploads, or posting, per
+CLAUDE.md).
+
+```bash
+venv\Scripts\python.exe serve.py
+# then it opens http://127.0.0.1:8000/ in your browser (Ctrl+C to stop)
+```
+
+Useful flags:
+- `--output <dir>` — folder of clips to serve (default `output`).
+- `--port <n>` — localhost port (default `8000`).
+- `--no-open` — don't auto-open a browser tab.
+
+The folder is re-read on every page load, so after re-running the pipeline just
+**refresh** to see the new clips. HTTP Range requests are supported, so scrubbing
+and seeking in the player work. Videos and downloads stay on your machine.
+
 ### Resolving input on its own
 ```bash
 venv\Scripts\python.exe ingest.py --input https://www.youtube.com/watch?v=...
