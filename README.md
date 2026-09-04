@@ -388,8 +388,12 @@ venv\Scripts\python.exe serve.py
   checkbox on each — tick the ones you want and **Download selected**, or grab
   them individually. Reload to fold them into the gallery below.
 - Each clip (results and gallery) gets a 9:16 player with its rank/score/time-
-  range parsed from the filename and the `--suggest` caption when the sibling
-  `.txt` exists.
+  range, an **energy** badge, and the scorer's **reason** for picking it (from a
+  `<clip>.meta.json` sidecar the pipeline writes), plus the `--suggest` caption
+  when the sibling `.txt` exists.
+- **exact cut (no scoring)** — tick it and fill from/to to just grab that exact
+  window as a 9:16 clip (via `cut.py`, no transcription or scoring). Combine with
+  facecam split if you like.
 
 It's **local and single-user**, consistent with CLAUDE.md: binds `127.0.0.1`
 (this machine only), no accounts, no uploads, and it never posts anywhere —

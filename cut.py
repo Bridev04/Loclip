@@ -32,6 +32,7 @@ import tempfile
 
 from ingest import resolve_input
 from captions import load_style, write_ass, STYLE_PATH
+from transcribe import parse_hms
 
 OUTPUT_DIR = "output"
 TARGET_W = 1080
@@ -217,8 +218,10 @@ def main():
         description="Cut a segment and reframe it to a 9:16 (1080x1920) vertical clip"
     )
     ap.add_argument("--input", required=True, help="local video path or a video URL (e.g. YouTube)")
-    ap.add_argument("--start", type=float, required=True, help="segment start in seconds")
-    ap.add_argument("--end", type=float, required=True, help="segment end in seconds")
+    ap.add_argument("--start", type=parse_hms, required=True,
+                    help="segment start (seconds or MM:SS / HH:MM:SS)")
+    ap.add_argument("--end", type=parse_hms, required=True,
+                    help="segment end (seconds or MM:SS / HH:MM:SS)")
     ap.add_argument("--fit", choices=sorted(FILTERS), default="cover",
                     help="cover = fill+crop (default), contain = fit+pad")
     ap.add_argument("--output-dir", default=OUTPUT_DIR, help="where to write the clip")

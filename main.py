@@ -179,9 +179,26 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                           facecam=facecam, facecam_frac=facecam_frac,
                           loudnorm=loudnorm)
         outs.append(out)
+        _write_clip_meta(out, i, r)
         if suggest:
             _write_suggestion(out, text_by_id.get(r["id"], ""))
     return outs
+
+
+def _write_clip_meta(clip_path: str, rank: int, r: dict):
+    """Write a <clip>.meta.json sidecar so the gallery can show why it was picked
+    (score, the scorer's reason, and the audio-energy/blended figures)."""
+    meta = {"rank": rank, "score": r.get("score"), "start": r.get("start"),
+            "end": r.get("end"), "reason": r.get("reason", "")}
+    if "energy" in r:
+        meta["energy"] = r["energy"]
+        meta["blended"] = r.get("blended")
+    try:
+        path = os.path.splitext(clip_path)[0] + ".meta.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False)
+    except OSError:
+        pass  # best-effort; never lose a clip over its sidecar
 
 
 def _write_suggestion(clip_path: str, clip_text: str):

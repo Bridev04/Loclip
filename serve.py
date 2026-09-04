@@ -102,7 +102,7 @@ def clip_info(clips_dir: str, name: str):
 
     info = {"name": name, "size": os.path.getsize(path),
             "rank": None, "score": None, "start": None, "end": None,
-            "suggest": None}
+            "suggest": None, "reason": None, "energy": None, "blended": None}
     m = _RANK_RE.search(name)
     if m:
         info["rank"] = int(m.group(1))
@@ -114,6 +114,17 @@ def clip_info(clips_dir: str, name: str):
         if m:
             info["start"] = float(m.group(1))
             info["end"] = float(m.group(2))
+
+    meta = os.path.splitext(path)[0] + ".meta.json"
+    if os.path.isfile(meta):
+        try:
+            with open(meta, encoding="utf-8") as f:
+                md = json.load(f)
+            info["reason"] = md.get("reason") or None
+            info["energy"] = md.get("energy")
+            info["blended"] = md.get("blended")
+        except (OSError, ValueError):
+            pass
 
     txt = os.path.splitext(path)[0] + ".txt"
     if os.path.isfile(txt):
@@ -155,19 +166,30 @@ def _clips_from_log(log_lines: list, clips_dir: str) -> list:
 
 def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
              start: str = "", end: str = "", split: bool = False,
-             facecam: str = ""):
-    """Run main.py as a subprocess, streaming its output into JOB['log']."""
-    args = [sys.executable, "main.py", "--input", input_value, "--n", str(n)]
-    if suggest:
-        args.append("--suggest")
-    if start:
-        args += ["--start", start]
-    if end:
-        args += ["--end", end]
-    if split:
-        args.append("--split")
-        if facecam:
-            args += ["--facecam", facecam]
+             facecam: str = "", manual: bool = False):
+    """Run the pipeline (or a plain exact cut) as a subprocess, streaming output.
+
+    manual=True cuts exactly [start, end] via cut.py (no transcription/scoring)
+    -- a fast "just grab this segment" path. Otherwise runs the full main.py."""
+    if manual:
+        args = [sys.executable, "cut.py", "--input", input_value,
+                "--start", start, "--end", end]
+        if split:
+            args += ["--layout", "split"]
+            if facecam:
+                args += ["--facecam", facecam]
+    else:
+        args = [sys.executable, "main.py", "--input", input_value, "--n", str(n)]
+        if suggest:
+            args.append("--suggest")
+        if start:
+            args += ["--start", start]
+        if end:
+            args += ["--end", end]
+        if split:
+            args.append("--split")
+            if facecam:
+                args += ["--facecam", facecam]
     JOB["log"].append("$ " + " ".join(args[1:]))
     try:
         proc = subprocess.Popen(
@@ -193,7 +215,7 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
 
 def start_job(input_value: str, n: int, suggest: bool, clips_dir: str,
               start: str = "", end: str = "", split: bool = False,
-              facecam: str = "") -> bool:
+              facecam: str = "", manual: bool = False) -> bool:
     """Start a clip job if none is running. Returns False if one already is."""
     with _JOB_LOCK:
         if JOB["status"] == "running":
@@ -201,7 +223,7 @@ def start_job(input_value: str, n: int, suggest: bool, clips_dir: str,
         JOB.update(status="running", input=input_value, n=n, log=[], clips=[])
     threading.Thread(
         target=_run_job,
-        args=(input_value, n, suggest, clips_dir, start, end, split, facecam),
+        args=(input_value, n, suggest, clips_dir, start, end, split, facecam, manual),
         daemon=True).start()
     return True
 
@@ -215,10 +237,15 @@ def _card_html(c: dict) -> str:
         badges.append(f'<span class="badge rank">#{c["rank"]}</span>')
     if c["score"] is not None:
         badges.append(f'<span class="badge score">score {c["score"]}</span>')
+    if c.get("energy") is not None:
+        badges.append(f'<span class="badge energy">energy {c["energy"]:.2f}</span>')
     meta = []
     if c["start"] is not None and c["end"] is not None:
         meta.append(f'{_fmt_dur(c["end"] - c["start"])} &middot; {c["start"]:g}–{c["end"]:g}s')
     meta.append(_fmt_size(c["size"]))
+    reason = ""
+    if c.get("reason"):
+        reason = f'<div class="reason">{html.escape(c["reason"])}</div>'
     suggest = ""
     if c["suggest"]:
         suggest = ('<details class="suggest"><summary>suggested caption</summary>'
@@ -229,6 +256,7 @@ def _card_html(c: dict) -> str:
         <div class="badges">{''.join(badges)}</div>
         <div class="fname" title="{html.escape(c['name'])}">{html.escape(c['name'])}</div>
         <div class="meta">{' &middot; '.join(meta)}</div>
+        {reason}
         {suggest}
         <a class="dl" href="{src}" download>download</a>
       </div>
@@ -303,6 +331,8 @@ def render_page(clips_dir: str) -> bytes:
   .badge {{ font-size:12px; font-weight:600; padding:2px 8px; border-radius:999px; }}
   .badge.rank {{ background:rgba(124,156,255,.18); color:var(--accent); }}
   .badge.score {{ background:rgba(62,207,142,.16); color:var(--score); }}
+  .badge.energy {{ background:rgba(255,176,32,.16); color:#ffb020; }}
+  .reason {{ font-size:12px; color:var(--text); opacity:.85; font-style:italic; }}
   .fname {{ font-size:12px; color:var(--dim); font-family:ui-monospace,Consolas,monospace;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
   .meta {{ font-size:12px; color:var(--dim); }}
@@ -334,7 +364,8 @@ def render_page(clips_dir: str) -> bytes:
         <input type="text" id="start" class="time" placeholder="from (e.g. 5:00)"></label>
       <label class="opt">→
         <input type="text" id="end" class="time" placeholder="to (e.g. 12:30)"></label>
-      <span class="hint" style="margin:0">optional — leave blank for the whole video; transcribes just this window so a long video is fast</span>
+      <label class="opt"><input type="checkbox" id="manual"> exact cut (no scoring)</label>
+      <span class="hint" style="margin:0">optional — leave blank for the whole video. Tick “exact cut” to just grab from→to as-is (needs both).</span>
     </div>
     <div class="row" style="margin-top:10px">
       <label class="opt"><input type="checkbox" id="split"> facecam split (cam on top, gameplay on bottom)</label>
@@ -363,10 +394,12 @@ function fmtSize(n) {{ const mb = n/1048576; return mb>=1 ? mb.toFixed(1)+' MB' 
 function resultCard(c) {{
   const src = '/clips/' + encodeURIComponent(c.name);
   const badges = (c.rank!=null?`<span class="badge rank">#${{c.rank}}</span>`:'')
-               + (c.score!=null?`<span class="badge score">score ${{c.score}}</span>`:'');
+               + (c.score!=null?`<span class="badge score">score ${{c.score}}</span>`:'')
+               + (c.energy!=null?`<span class="badge energy">energy ${{c.energy.toFixed(2)}}</span>`:'');
   let meta = [];
   if (c.start!=null && c.end!=null) meta.push(fmtDur(c.end-c.start)+' · '+c.start+'–'+c.end+'s');
   meta.push(fmtSize(c.size));
+  const reason = c.reason ? `<div class="reason">${{c.reason.replace(/</g,'&lt;')}}</div>` : '';
   const suggest = c.suggest ? `<details class="suggest"><summary>suggested caption</summary><pre>${{c.suggest.replace(/</g,'&lt;')}}</pre></details>` : '';
   const div = document.createElement('div');
   div.className = 'card';
@@ -374,7 +407,7 @@ function resultCard(c) {{
     <video controls preload="metadata" playsinline src="${{src}}"></video>
     <div class="info"><div class="badges">${{badges}}</div>
       <div class="fname" title="${{c.name}}">${{c.name}}</div>
-      <div class="meta">${{meta.join(' · ')}}</div>${{suggest}}
+      <div class="meta">${{meta.join(' · ')}}</div>${{reason}}${{suggest}}
       <a class="dl" href="${{src}}" download>download</a></div>`;
   const pick = div.querySelector('.pick');
   const sync = () => div.classList.toggle('sel', pick.checked);
@@ -429,8 +462,10 @@ go.onclick = async () => {{
   const res = await fetch('/clip', {{ method:'POST', headers:{{'Content-Type':'application/json'}},
     body: JSON.stringify({{ input, n: +$('#n').value || 5, suggest: $('#suggest').checked,
       start: $('#start').value.trim(), end: $('#end').value.trim(),
-      split: $('#split').checked, facecam: $('#facecam').value.trim() }}) }});
-  if (res.status === 409) {{ statusEl.textContent = 'A job is already running.'; return; }}
+      split: $('#split').checked, facecam: $('#facecam').value.trim(),
+      manual: $('#manual').checked }}) }});
+  if (res.status === 409) {{ statusEl.textContent = 'A job is already running.'; spin.style.display='none'; go.disabled=false; return; }}
+  if (!res.ok) {{ const j = await res.json().catch(()=>({{}})); statusEl.textContent = j.error || 'Request failed.'; statusEl.style.color='var(--err)'; spin.style.display='none'; go.disabled=false; return; }}
   timer = setInterval(poll, 1000); poll();
 }};
 $('#inp').addEventListener('keydown', e => {{ if (e.key === 'Enter') go.click(); }});
@@ -508,8 +543,12 @@ class ClipHandler(BaseHTTPRequestHandler):
         end = str(data.get("end", "")).strip()
         split = bool(data.get("split"))
         facecam = str(data.get("facecam", "")).strip()
+        manual = bool(data.get("manual"))
+        if manual and not (start and end):
+            self._send(400, "application/json", b'{"error":"exact cut needs from and to"}')
+            return
         ok = start_job(input_value, n, bool(data.get("suggest")),
-                       self.server.clips_dir, start, end, split, facecam)
+                       self.server.clips_dir, start, end, split, facecam, manual)
         if not ok:
             self._send(409, "application/json", b'{"error":"a job is already running"}')
         else:
