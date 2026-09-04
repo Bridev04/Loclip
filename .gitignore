@@ -13,6 +13,9 @@ __pycache__/
 /media/
 /output/
 
+# Cached transcripts (regenerated on demand; see transcribe.py)
+/transcripts/
+
 # Downloaded model weights (fetched once; see README Phase 6)
 /models/
 

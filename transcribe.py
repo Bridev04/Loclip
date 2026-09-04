@@ -25,6 +25,7 @@ As a library:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -36,6 +37,11 @@ from ingest import resolve_input
 
 MODEL = "large-v3"
 OUTPUT = "transcript.json"
+# Transcripts are cached here keyed by the source file + range + model, so
+# re-running the SAME input/window (e.g. iterating on scoring, reframe, split)
+# skips re-transcribing. Invalidated automatically when the video's size/mtime
+# changes. Gitignored.
+CACHE_DIR = "transcripts"
 # Batched GPU inference is much faster (same model/accuracy) than decoding one
 # window at a time. Memory grows with batch size; 8 is safe on an 8GB card with
 # int8 large-v3, and an OOM/incompatibility falls back to sequential decoding.
@@ -91,10 +97,18 @@ def _run_whisper(wmodel, wav: str, batch_size: int):
     return wmodel.transcribe(wav, word_timestamps=True, vad_filter=True)
 
 
+def _cache_path(local_path: str, start, end, model_name: str) -> str:
+    """A cache filename keyed by the source file (size+mtime), range, and model."""
+    st = os.stat(local_path)
+    raw = (f"{os.path.abspath(local_path)}|{st.st_size}|{int(st.st_mtime)}"
+           f"|{start}|{end}|{model_name}")
+    return os.path.join(CACHE_DIR, hashlib.sha1(raw.encode()).hexdigest()[:16] + ".json")
+
+
 def transcribe(input_path: str, model_name: str = MODEL,
                device: str = "cuda", compute_type: str = "int8",
                start: float = None, end: float = None,
-               batch_size: int = BATCH_SIZE) -> dict:
+               batch_size: int = BATCH_SIZE, cache: bool = True) -> dict:
     """Resolve input, extract audio, and transcribe with word timestamps.
 
     When start/end (seconds) are given, only that window of the source is
@@ -102,17 +116,32 @@ def transcribe(input_path: str, model_name: str = MODEL,
     timestamps are offset by +start so they stay in ABSOLUTE source time -- the
     scorer, cutter and captions all keep working against the full video.
 
-    Returns the dict later written to transcript.json.
+    A successful result is cached under transcripts/ keyed by source+range+model;
+    a re-run with the same inputs loads it and skips transcription (cache=False
+    to force a fresh pass). Returns the dict later written to transcript.json.
     """
+    local_path = resolve_input(input_path)
+    print(f"Input resolved -> {local_path}", flush=True)
+
+    # Cache lookup happens BEFORE loading torch/whisper so a hit is near-instant.
+    cpath = None
+    if cache:
+        try:
+            cpath = _cache_path(local_path, start, end, model_name)
+            if os.path.exists(cpath):
+                with open(cpath, encoding="utf-8") as f:
+                    cached = json.load(f)
+                print(f"Transcript cache hit -> {cpath} (skipping transcription)", flush=True)
+                return cached
+        except (OSError, ValueError):
+            cpath = None  # cache is best-effort; fall through to a real transcribe
+
     # Import torch FIRST: on Windows this registers venv\...\torch\lib on the
     # DLL search path, which is where the cu124 wheel ships cublas64_12.dll and
     # the cudnn DLLs that ctranslate2 (faster-whisper's GPU backend) loads.
     # Without this, standalone runs fail with "cublas64_12.dll ... cannot be loaded".
     import torch  # noqa: F401
     from faster_whisper import WhisperModel
-
-    local_path = resolve_input(input_path)
-    print(f"Input resolved -> {local_path}", flush=True)
 
     tmp_wav = os.path.join(tempfile.gettempdir(), "clipper_transcribe_audio.wav")
     try:
@@ -156,6 +185,14 @@ def transcribe(input_path: str, model_name: str = MODEL,
         }
         if start is not None or end is not None:
             result["range"] = [offset, round(offset + info.duration, 3)]
+
+        if cache and cpath:
+            try:
+                os.makedirs(CACHE_DIR, exist_ok=True)
+                with open(cpath, "w", encoding="utf-8") as f:
+                    json.dump(result, f, ensure_ascii=False)
+            except OSError:
+                pass  # caching is best-effort
         return result
     finally:
         if os.path.exists(tmp_wav):
@@ -201,6 +238,8 @@ def main():
                     help="only transcribe up to this time (seconds or MM:SS / HH:MM:SS)")
     ap.add_argument("--batch-size", type=int, default=BATCH_SIZE,
                     help=f"batched-inference size (default {BATCH_SIZE}; 1 = sequential/most conservative)")
+    ap.add_argument("--no-cache", dest="cache", action="store_false",
+                    help="force a fresh transcription instead of using transcripts/ cache")
     args = ap.parse_args()
 
     if args.start is not None and args.end is not None and args.end <= args.start:
@@ -209,7 +248,8 @@ def main():
 
     try:
         result = transcribe(args.input, args.model, args.device, args.compute_type,
-                            start=args.start, end=args.end, batch_size=args.batch_size)
+                            start=args.start, end=args.end, batch_size=args.batch_size,
+                            cache=args.cache)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

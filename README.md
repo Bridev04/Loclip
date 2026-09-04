@@ -66,6 +66,12 @@ Transcription uses faster-whisper's **batched GPU inference** by default (same
 GPU out-of-memory, lower `--batch-size` (default 8; `1` = sequential). Batch
 size is also a `main.py` flag.
 
+Successful transcripts are **cached** under `transcripts/` keyed by the source
+file (size+mtime) + range + model, so re-running the **same input/window** (e.g.
+iterating on scoring, reframe, or split settings) skips transcription entirely
+(seconds → instant). The cache invalidates itself if the video changes; pass
+`--no-cache` to force a fresh pass. `transcripts/` is gitignored.
+
 To transcribe just a slice of a long video, add `--start` / `--end` (`SS`,
 `MM:SS`, or `HH:MM:SS`); word timestamps are still written in absolute source
 time, and a `range` field records the window:
@@ -298,6 +304,7 @@ is transcribed).
 | `--facecam` | auto | facecam region for `--split`: corner, `x,y,w,h` pixels, or fractions |
 | `--facecam-frac` | 0.4 | top share of the frame for the facecam with `--split` |
 | `--batch-size` | 8 | transcription batch size (lower on GPU OOM; `1` = sequential) |
+| `--no-cache` | on | reuse cached transcripts for the same input/window (on by default) |
 | `--captions` / `--no-captions` | on | burn TikTok-style captions in vs. skip |
 | `--no-loudnorm` | on | audio loudness normalization to ~-14 LUFS (on by default) |
 | `--fit cover\|contain` | cover | static-crop mode (ignored when reframe is on) |
