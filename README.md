@@ -29,9 +29,19 @@ Verifies torch+GPU, faster-whisper on GPU, ffmpeg+NVENC, and a live Claude API c
 
 ```bash
 venv\Scripts\python.exe scripts\smoke_test.py --input path\to\short_sample.mp4
+# or a URL:
+venv\Scripts\python.exe scripts\smoke_test.py --input https://www.youtube.com/watch?v=...
 ```
 
-`--input` is optional; without it the whisper check transcribes a generated tone
-(it just proves the model loads and runs on the GPU). Expect **all four checks
-to report PASS**. First run downloads the large-v3 Whisper weights (~3 GB), so
-give it a minute.
+`--input` accepts a **local video/audio path or a video URL** (YouTube, etc.);
+URLs are downloaded to `/media` first via yt-dlp. It's optional — without it the
+whisper check transcribes a generated tone (just proving the model loads on the
+GPU). Expect **all four checks to report PASS**. First run downloads the large-v3
+Whisper weights (~3 GB), so give it a minute. Only clip content you have the
+rights to.
+
+### Resolving input on its own
+```bash
+venv\Scripts\python.exe ingest.py --input https://www.youtube.com/watch?v=...
+```
+Downloads (if a URL) and prints the local file path. Used by every pipeline stage.

@@ -9,3 +9,4 @@ anthropic
 python-dotenv
 librosa
 mediapipe
+yt-dlp

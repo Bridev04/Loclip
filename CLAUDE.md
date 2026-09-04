@@ -2,9 +2,16 @@
 
 ## What this is
 A LOCAL, single-user tool. It is NOT a hosted product, has no web server,
-no accounts, no auto-posting. Input: a long video file. Output: several
-short captioned vertical (9:16) clips saved to /output that I upload to
-social media manually.
+no accounts, no auto-posting. Input: a long video file OR a video URL
+(e.g. YouTube), which is downloaded locally first. Output: several short
+captioned vertical (9:16) clips saved to /output that I upload to social
+media manually.
+
+## Input handling
+- Every module takes --input, which may be a local path OR an http(s) URL.
+- ingest.py::resolve_input() is the single front door: URLs are downloaded
+  to /media via yt-dlp (capped at 1080p mp4), local paths pass through.
+- Only used to clip content I have the rights to.
 
 ## My machine
 - OS: Windows 11

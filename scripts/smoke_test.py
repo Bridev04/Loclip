@@ -22,6 +22,9 @@ import subprocess
 import sys
 import tempfile
 
+# make the repo root importable so we can use ingest.py from scripts/
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # --- pretty result tracking -------------------------------------------------
 RESULTS = {}
 
@@ -103,9 +106,15 @@ def check_whisper(input_path):
         if not sample:
             record("whisper transcribe", False, "no --input and could not generate a tone (ffmpeg missing)")
             return
-    elif not os.path.exists(sample):
-        record("whisper transcribe", False, f"--input not found: {sample}")
-        return
+    else:
+        # --input may be a local path OR a video URL (YouTube, etc.)
+        try:
+            from ingest import resolve_input
+            sample = resolve_input(sample)
+            print(f"    input resolved -> {sample}", flush=True)
+        except Exception as e:
+            record("whisper transcribe", False, f"could not resolve --input: {type(e).__name__}: {e}")
+            return
 
     try:
         model = WhisperModel("large-v3", device="cuda", compute_type="int8")
@@ -189,7 +198,7 @@ def check_anthropic():
 # --- main -------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="Local Clipper Phase 1 smoke test")
-    ap.add_argument("--input", help="path to a short sample video/audio for the whisper check")
+    ap.add_argument("--input", help="local video/audio path OR a video URL (e.g. YouTube) for the whisper check")
     args = ap.parse_args()
 
     check_torch()
