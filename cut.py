@@ -23,12 +23,15 @@ As a library:
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 from ingest import resolve_input
+from captions import load_style, write_ass, STYLE_PATH
 
 OUTPUT_DIR = "output"
 TARGET_W = 1080
@@ -53,10 +56,34 @@ def _safe_stem(path: str) -> str:
     return os.path.splitext(os.path.basename(path))[0] or "clip"
 
 
+def _ass_filter_path(ass_path: str) -> str:
+    """Escape an .ass path for use inside an ffmpeg -vf filtergraph.
+
+    The Windows drive-letter colon is painful here: it is a separator both to
+    the filtergraph parser AND to the ass filter's own option parser. Easiest
+    to sidestep -- hand ffmpeg a path relative to the cwd (no colon at all) when
+    we can, and only fall back to an escaped, quoted absolute path (different
+    drive from cwd) where a colon is unavoidable.
+    """
+    try:
+        p = os.path.relpath(ass_path).replace("\\", "/")
+    except ValueError:  # different drive on Windows -> no relative path exists
+        p = os.path.abspath(ass_path).replace("\\", "/")
+    # Escape the colon (if any) and single-quote so neither parser splits on it.
+    p = p.replace(":", "\\:")
+    return f"'{p}'"
+
+
 def cut_segment(input_path: str, start: float, end: float,
                 fit: str = "cover", output_dir: str = OUTPUT_DIR,
-                out_path: str = None) -> str:
+                out_path: str = None, captions: bool = False,
+                words: list = None, style: dict = None) -> str:
     """Resolve input, cut [start, end], reframe to 9:16, encode to out_path.
+
+    When captions=True, an ASS caption file is generated from `words` (a list of
+    {start, end, word} spanning the source video) and burned into the clip.
+    The subtitle filter is applied AFTER the crop/scale so captions land inside
+    the 9:16 frame. `style` defaults to caption_style.json.
 
     Returns the path to the written clip.
     """
@@ -84,6 +111,21 @@ def cut_segment(input_path: str, start: float, end: float,
         if parent:
             os.makedirs(parent, exist_ok=True)
 
+    # Build the video filter chain. Captions come LAST so the ass filter draws
+    # onto the finished 1080x1920 frame (crop/scale already applied).
+    vf = FILTERS[fit]
+    ass_path = None
+    if captions:
+        if not words:
+            raise ValueError("captions=True requires `words` (word timestamps)")
+        if style is None:
+            style = load_style()
+        # Temp .ass on the same drive as the output; removed after the encode.
+        fd, ass_path = tempfile.mkstemp(suffix=".ass", dir=os.path.dirname(out_path) or ".")
+        os.close(fd)
+        write_ass(words, start, end, style, ass_path)
+        vf = f"{vf},ass={_ass_filter_path(ass_path)}"
+
     # -ss before -i is a fast seek; because we re-encode, ffmpeg still lands on
     # an accurate frame at `start`. -t is the clip length (end - start).
     cmd = [
@@ -91,7 +133,7 @@ def cut_segment(input_path: str, start: float, end: float,
         "-ss", f"{start}",
         "-i", local_path,
         "-t", f"{duration}",
-        "-vf", FILTERS[fit],
+        "-vf", vf,
         "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k",
@@ -101,13 +143,18 @@ def cut_segment(input_path: str, start: float, end: float,
 
     print(
         f"Cutting {start:g}s -> {end:g}s ({duration:g}s), reframe={fit}, "
+        f"captions={'on' if captions else 'off'}, "
         f"encoding {TARGET_W}x{TARGET_H} h264_nvenc ...",
         flush=True,
     )
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not os.path.exists(out_path):
-        tail = (proc.stderr or "").strip().splitlines()[-8:]
-        raise RuntimeError("ffmpeg cut/encode failed:\n" + "\n".join(tail))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            tail = (proc.stderr or "").strip().splitlines()[-8:]
+            raise RuntimeError("ffmpeg cut/encode failed:\n" + "\n".join(tail))
+    finally:
+        if ass_path and os.path.exists(ass_path):
+            os.remove(ass_path)
 
     return out_path
 
@@ -123,11 +170,27 @@ def main():
                     help="cover = fill+crop (default), contain = fit+pad")
     ap.add_argument("--output-dir", default=OUTPUT_DIR, help="where to write the clip")
     ap.add_argument("--output", default=None, help="explicit output file path (overrides --output-dir)")
+    ap.add_argument("--captions", action="store_true",
+                    help="burn TikTok-style captions in (needs --transcript for word timestamps)")
+    ap.add_argument("--transcript", default=None,
+                    help="transcript.json with word timestamps (required with --captions)")
+    ap.add_argument("--style", default=STYLE_PATH, help="caption style config json")
     args = ap.parse_args()
+
+    words = None
+    style = None
+    if args.captions:
+        if not args.transcript:
+            print("ERROR: --captions requires --transcript with word timestamps.", file=sys.stderr)
+            sys.exit(2)
+        with open(args.transcript, encoding="utf-8") as f:
+            words = json.load(f)["words"]
+        style = load_style(args.style)
 
     try:
         out = cut_segment(args.input, args.start, args.end, args.fit,
-                          args.output_dir, args.output)
+                          args.output_dir, args.output,
+                          captions=args.captions, words=words, style=style)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

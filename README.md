@@ -107,6 +107,8 @@ not the code**, then re-run. Useful flags:
   re-transcribing, so you can iterate on scoring/selection fast (no `--input`
   needed). The video path is read from the transcript.
 - `--fit contain` — letterbox instead of crop.
+- `--no-captions` — skip the caption burn-in (captions are on by default; see
+  Phase 7).
 
 Score or segment on their own (both read `transcript.json`, no re-transcribe):
 ```bash
@@ -116,6 +118,47 @@ venv\Scripts\python.exe score.py                    # print the ranked segments
 
 > Needs `ANTHROPIC_API_KEY` in `.env`. A run costs a fraction of a cent (Haiku).
 > If the model returns malformed JSON, the scorer reports it instead of crashing.
+
+### Phase 7 — caption burn-in (TikTok/Reels style)
+`captions.py` turns the word timestamps in `transcript.json` into an ASS
+subtitle file — one or two words on screen at a time, big and centered, with
+the active (currently-spoken) word highlighted karaoke-style — and `cut.py`
+burns it into the clip during the final NVENC encode (the subtitle filter runs
+*after* the 9:16 crop, so captions land inside the frame). Captions are **on by
+default** in the `--n` pipeline, so the Phase 4 command already produces
+captioned clips:
+
+```bash
+venv\Scripts\python.exe main.py --transcript transcript.json --n 5
+# toggle captions off:
+venv\Scripts\python.exe main.py --transcript transcript.json --n 5 --no-captions
+```
+
+To iterate on the *look* without re-running the whole pipeline, caption one
+window straight from `cut.py`:
+
+```bash
+venv\Scripts\python.exe cut.py --input media\2PxLYWjgLys.mp4 --start 1278.6 --end 1302.36 --captions --transcript transcript.json --output output\captiontest.mp4
+```
+
+Open the clip and scrub: text should be centered in the lower third, uppercase,
+white with a black outline, showing ~2 words at a time, and the spoken word
+should light up yellow in time with the audio.
+
+**Restyle without touching code** by editing `caption_style.json`:
+- `font`, `font_size`, `bold`, `uppercase`
+- `words_per_group` — 1 or 2 (words visible at once)
+- `text_color`, `highlight_color`, `outline_color` — `#RRGGBB`
+- `outline_width`, `shadow`, `highlight_scale` (active-word "pop", percent)
+- `alignment` (ASS numpad: `2` = bottom-center, `5` = middle), `margin_v` (px
+  lifted off the aligned edge), `margin_h`
+- `max_gap` — start a fresh caption group when the pause before a word exceeds
+  this (seconds), so captions reset on real pauses.
+
+Inspect the generated subtitles directly (no encode) with:
+```bash
+venv\Scripts\python.exe captions.py --transcript transcript.json --start 1278.6 --end 1302.36 --out sample.ass
+```
 
 ### Resolving input on its own
 ```bash

@@ -21,6 +21,7 @@ from transcribe import transcribe, OUTPUT as TRANSCRIPT_OUT, _fmt_hms
 from segments import generate_segments
 from score import score_segments, select_top_distinct, DEFAULT_MODEL
 from cut import cut_segment, OUTPUT_DIR, _safe_stem
+from captions import load_style
 
 DUMB_CLIP_SECONDS = 45.0
 
@@ -54,12 +55,15 @@ def run_dumb(input_path: str, fit: str = "cover") -> list:
 def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  model: str = DEFAULT_MODEL, min_len: float = None,
                  max_len: float = None, overlap: float = 0.5,
-                 transcript_path: str = None) -> list:
+                 transcript_path: str = None, captions: bool = True) -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
     re-transcribing -- the fast loop for tuning scoring/selection on a video
     you've already transcribed.
+
+    When captions=True (default) each clip gets TikTok-style burned-in captions
+    generated from the transcript's word timestamps.
     """
     if transcript_path:
         print(f"== Reusing transcript {transcript_path} ==", flush=True)
@@ -90,14 +94,19 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
         print(f"  #{i}  score {r['score']:>3}  {r['start']:>7.2f}-{r['end']:>7.2f}s  {r['reason']}",
               flush=True)
 
-    print(f"\n== Cutting top {len(top)} clips ==", flush=True)
+    words = result["words"] if captions else None
+    style = load_style() if captions else None
+
+    print(f"\n== Cutting top {len(top)} clips (captions={'on' if captions else 'off'}) ==",
+          flush=True)
     stem = _safe_stem(local_path)
     outs = []
     for i, r in enumerate(top, 1):
         out_path = (f"{OUTPUT_DIR}/{stem}_rank{i:02d}_score{r['score']:02d}"
                     f"_{r['start']:g}-{r['end']:g}.mp4")
         out = cut_segment(local_path, start=r["start"], end=r["end"], fit=fit,
-                          out_path=out_path)
+                          out_path=out_path, captions=captions, words=words,
+                          style=style)
         outs.append(out)
     return outs
 
@@ -118,6 +127,10 @@ def main():
                     help="max allowed overlap between chosen clips, 0..1 (1.0 = disable dedup)")
     ap.add_argument("--transcript", default=None,
                     help="reuse this transcript.json instead of re-transcribing (--n only)")
+    ap.add_argument("--captions", dest="captions", action="store_true", default=True,
+                    help="burn TikTok-style captions into each clip (default on)")
+    ap.add_argument("--no-captions", dest="captions", action="store_false",
+                    help="skip caption burn-in")
     args = ap.parse_args()
 
     if args.dumb and args.n is not None:
@@ -137,7 +150,8 @@ def main():
             outs = run_dumb(args.input, args.fit)
         else:
             outs = run_pipeline(args.input, args.n, args.fit, args.model,
-                                args.min, args.max, args.overlap, args.transcript)
+                                args.min, args.max, args.overlap, args.transcript,
+                                args.captions)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

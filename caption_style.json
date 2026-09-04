@@ -1,0 +1,17 @@
+{
+  "font": "Arial Black",
+  "font_size": 92,
+  "bold": true,
+  "uppercase": true,
+  "words_per_group": 2,
+  "max_gap": 0.6,
+  "text_color": "#FFFFFF",
+  "highlight_color": "#FFE800",
+  "outline_color": "#000000",
+  "outline_width": 6,
+  "shadow": 3,
+  "highlight_scale": 112,
+  "alignment": 2,
+  "margin_v": 380,
+  "margin_h": 90
+}
