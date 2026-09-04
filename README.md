@@ -301,7 +301,9 @@ is transcribed).
 | `--captions` / `--no-captions` | on | burn TikTok-style captions in vs. skip |
 | `--no-loudnorm` | on | audio loudness normalization to ~-14 LUFS (on by default) |
 | `--fit cover\|contain` | cover | static-crop mode (ignored when reframe is on) |
-| `--model` | `claude-haiku-4-5` | Claude model id for scoring |
+| `--model` | `claude-haiku-4-5` | first-pass scorer that shortlists every candidate |
+| `--rank-model` | `claude-sonnet-5` | re-ranks the shortlist (two-stage); same as `--model` disables |
+| `--refine-top` | 10 | how many top candidates the rank-model re-scores (`0` = single-stage) |
 | `--min` / `--max` | 20 / 90 | candidate window length bounds (s) |
 | `--overlap` | 0.5 | max overlap between chosen clips (`1.0` disables dedup) |
 | `--energy-weight` | 0.3 | audio-energy share when re-ranking (`0` = pure LLM order); see Phase 5 |

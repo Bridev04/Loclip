@@ -29,7 +29,8 @@ import sys
 from transcribe import (transcribe, OUTPUT as TRANSCRIPT_OUT, _fmt_hms,
                         parse_hms, BATCH_SIZE)
 from segments import generate_segments
-from score import score_segments, select_top_distinct, DEFAULT_MODEL
+from score import (score_segments_2stage, select_top_distinct, DEFAULT_MODEL,
+                   DEFAULT_RANK_MODEL, DEFAULT_REFINE_TOP)
 from energy import compute_energies, blend_scores, DEFAULT_ENERGY_WEIGHT
 from cut import cut_segment, OUTPUT_DIR, _safe_stem
 from captions import load_style
@@ -90,7 +91,8 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  start: float = None, end: float = None,
                  layout: str = None, facecam: str = None,
                  facecam_frac: float = 0.4, batch_size: int = BATCH_SIZE,
-                 loudnorm: bool = True) -> list:
+                 loudnorm: bool = True, rank_model: str = DEFAULT_RANK_MODEL,
+                 refine_top: int = DEFAULT_REFINE_TOP) -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
@@ -123,8 +125,10 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
     if not candidates:
         raise RuntimeError("No candidate segments (transcript too short or empty).")
 
-    print(f"\n== Scoring with {model} ==", flush=True)
-    ranked = score_segments(candidates, model)
+    stage2 = refine_top > 0 and rank_model and rank_model != model
+    print(f"\n== Scoring with {model}"
+          f"{f' + {rank_model} (top {refine_top})' if stage2 else ''} ==", flush=True)
+    ranked = score_segments_2stage(candidates, model, rank_model, refine_top)
 
     # Phase 5: blend a local audio-energy signal into the ranking BEFORE overlap
     # suppression, so a genuinely punchy beat (laughs, emphatic delivery) can
@@ -203,7 +207,13 @@ def main():
                     help="plumbing slice: transcribe, then cut the first 45s (no scoring)")
     ap.add_argument("--fit", choices=["cover", "contain"], default="cover",
                     help="9:16 reframe: cover = fill+crop (default), contain = fit+pad")
-    ap.add_argument("--model", default=DEFAULT_MODEL, help="Claude model id for scoring")
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help="Claude model id for the first-pass scorer (shortlist)")
+    ap.add_argument("--rank-model", default=DEFAULT_RANK_MODEL,
+                    help="model that re-ranks the shortlist (two-stage; default Sonnet)")
+    ap.add_argument("--refine-top", type=int, default=DEFAULT_REFINE_TOP,
+                    help=f"how many top candidates the rank-model re-scores "
+                         f"(default {DEFAULT_REFINE_TOP}; 0 = single-stage, shortlist only)")
     ap.add_argument("--min", type=float, default=None, help="min candidate window length (s)")
     ap.add_argument("--max", type=float, default=None, help="max candidate window length (s)")
     ap.add_argument("--overlap", type=float, default=0.5,
@@ -288,7 +298,8 @@ def main():
                                     args.captions, args.reframe, args.suggest,
                                     args.energy_weight, args.start, args.end,
                                     args.layout, args.facecam, args.facecam_frac,
-                                    args.batch_size, args.loudnorm)
+                                    args.batch_size, args.loudnorm,
+                                    args.rank_model, args.refine_top)
             all_outs.extend(outs)
         except Exception as e:
             msg = f"{inp}: {type(e).__name__}: {e}"

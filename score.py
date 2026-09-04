@@ -28,6 +28,10 @@ from dotenv import load_dotenv
 PROMPT_PATH = os.path.join("prompts", "score.txt")
 # Default scorer per CLAUDE.md: cheap + fast. Sonnet is for final/hard cases.
 DEFAULT_MODEL = "claude-haiku-4-5"
+# Two-stage: Haiku shortlists every candidate, then Sonnet re-ranks the best few
+# (the picks that actually get cut) for sharper judgment at a few cents a run.
+DEFAULT_RANK_MODEL = "claude-sonnet-5"
+DEFAULT_REFINE_TOP = 10
 MAX_TOKENS = 8192
 
 
@@ -133,6 +137,42 @@ def score_segments(candidates: list, model: str = DEFAULT_MODEL,
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored
+
+
+def score_segments_2stage(candidates: list, shortlist_model: str = DEFAULT_MODEL,
+                          rank_model: str = DEFAULT_RANK_MODEL,
+                          refine_top: int = DEFAULT_REFINE_TOP,
+                          prompt_path: str = PROMPT_PATH) -> list:
+    """Two-stage scoring: shortlist with a cheap model, re-rank the best with a
+    stronger one.
+
+    `shortlist_model` (Haiku) scores every candidate; the top `refine_top` are
+    re-scored by `rank_model` (Sonnet) and those scores replace the shortlist's,
+    then everything is re-sorted. The re-rank is best-effort -- if it fails, the
+    shortlist ranking is returned unchanged so a run never dies on stage two.
+    Set refine_top<=0 (or the same model for both) to get plain single-stage.
+    """
+    ranked = score_segments(candidates, shortlist_model, prompt_path)
+    if refine_top <= 0 or rank_model == shortlist_model or len(ranked) <= 1:
+        return ranked
+
+    by_id = {c["id"]: c for c in candidates}
+    shortlist = [by_id[r["id"]] for r in ranked[:refine_top] if r["id"] in by_id]
+    if not shortlist:
+        return ranked
+
+    print(f"  refining top {len(shortlist)} with {rank_model} ...", flush=True)
+    try:
+        refined = score_segments(shortlist, rank_model, prompt_path)
+    except Exception as e:
+        print(f"  WARNING: refine with {rank_model} failed ({type(e).__name__}: {e}); "
+              f"keeping {shortlist_model} order.", flush=True)
+        return ranked
+
+    new = {r["id"]: r for r in refined}
+    merged = [new.get(r["id"], r) for r in ranked]
+    merged.sort(key=lambda x: x["score"], reverse=True)
+    return merged
 
 
 def _overlap_frac(a: dict, b: dict) -> float:
