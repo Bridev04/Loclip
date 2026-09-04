@@ -36,6 +36,10 @@ from ingest import resolve_input
 
 MODEL = "large-v3"
 OUTPUT = "transcript.json"
+# Batched GPU inference is much faster (same model/accuracy) than decoding one
+# window at a time. Memory grows with batch size; 8 is safe on an 8GB card with
+# int8 large-v3, and an OOM/incompatibility falls back to sequential decoding.
+BATCH_SIZE = 8
 
 
 def extract_audio(video_path: str, out_wav: str,
@@ -68,9 +72,29 @@ def extract_audio(video_path: str, out_wav: str,
     return out_wav
 
 
+def _run_whisper(wmodel, wav: str, batch_size: int):
+    """Transcribe `wav` with word timestamps, preferring batched GPU inference.
+
+    Returns (segments, info). Tries faster-whisper's BatchedInferencePipeline
+    (materialized so an OOM or version mismatch surfaces here) and falls back to
+    sequential decoding on any failure, so a low-VRAM box still works."""
+    if batch_size and batch_size > 1:
+        try:
+            from faster_whisper import BatchedInferencePipeline
+            pipe = BatchedInferencePipeline(model=wmodel)
+            segments, info = pipe.transcribe(
+                wav, batch_size=batch_size, word_timestamps=True, vad_filter=True)
+            return list(segments), info  # force decode now to catch errors here
+        except Exception as e:
+            print(f"  batched inference unavailable ({type(e).__name__}: {e}); "
+                  f"falling back to sequential.", flush=True)
+    return wmodel.transcribe(wav, word_timestamps=True, vad_filter=True)
+
+
 def transcribe(input_path: str, model_name: str = MODEL,
                device: str = "cuda", compute_type: str = "int8",
-               start: float = None, end: float = None) -> dict:
+               start: float = None, end: float = None,
+               batch_size: int = BATCH_SIZE) -> dict:
     """Resolve input, extract audio, and transcribe with word timestamps.
 
     When start/end (seconds) are given, only that window of the source is
@@ -102,11 +126,11 @@ def transcribe(input_path: str, model_name: str = MODEL,
         print(f"Loading faster-whisper {model_name} on {device} ({compute_type}) ...", flush=True)
         wmodel = WhisperModel(model_name, device=device, compute_type=compute_type)
 
-        print("Transcribing (word timestamps) ...", flush=True)
+        print(f"Transcribing (word timestamps, batched x{batch_size}) ...", flush=True)
         # vad_filter drops silent regions before decoding. Besides being faster,
         # it prevents large-v3's habit of hallucinating boilerplate (e.g.
         # "Subtitles by the Amara.org community") over long silent/music tails.
-        segments, info = wmodel.transcribe(tmp_wav, word_timestamps=True, vad_filter=True)
+        segments, info = _run_whisper(wmodel, tmp_wav, batch_size)
 
         # Offset word timestamps back into absolute source time when we only
         # transcribed a window (the extracted WAV started at `start`).
@@ -175,6 +199,8 @@ def main():
                     help="only transcribe from this time (seconds or MM:SS / HH:MM:SS)")
     ap.add_argument("--end", type=parse_hms, default=None,
                     help="only transcribe up to this time (seconds or MM:SS / HH:MM:SS)")
+    ap.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                    help=f"batched-inference size (default {BATCH_SIZE}; 1 = sequential/most conservative)")
     args = ap.parse_args()
 
     if args.start is not None and args.end is not None and args.end <= args.start:
@@ -183,7 +209,7 @@ def main():
 
     try:
         result = transcribe(args.input, args.model, args.device, args.compute_type,
-                            start=args.start, end=args.end)
+                            start=args.start, end=args.end, batch_size=args.batch_size)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

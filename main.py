@@ -26,7 +26,8 @@ import os
 import re
 import sys
 
-from transcribe import transcribe, OUTPUT as TRANSCRIPT_OUT, _fmt_hms, parse_hms
+from transcribe import (transcribe, OUTPUT as TRANSCRIPT_OUT, _fmt_hms,
+                        parse_hms, BATCH_SIZE)
 from segments import generate_segments
 from score import score_segments, select_top_distinct, DEFAULT_MODEL
 from energy import compute_energies, blend_scores, DEFAULT_ENERGY_WEIGHT
@@ -54,10 +55,10 @@ def _gather_inputs(input_path: str) -> list:
 
 
 def _transcribe_and_save(input_path: str, start: float = None,
-                         end: float = None) -> dict:
+                         end: float = None, batch_size: int = BATCH_SIZE) -> dict:
     """Transcribe input and persist transcript.json; return the result dict."""
     print("== Transcribing ==", flush=True)
-    result = transcribe(input_path, start=start, end=end)
+    result = transcribe(input_path, start=start, end=end, batch_size=batch_size)
     with open(TRANSCRIPT_OUT, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(
@@ -88,7 +89,7 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  energy_weight: float = DEFAULT_ENERGY_WEIGHT,
                  start: float = None, end: float = None,
                  layout: str = None, facecam: str = None,
-                 facecam_frac: float = 0.4) -> list:
+                 facecam_frac: float = 0.4, batch_size: int = BATCH_SIZE) -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
@@ -106,7 +107,8 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
         with open(transcript_path, encoding="utf-8") as f:
             result = json.load(f)
     else:
-        result = _transcribe_and_save(input_path, start=start, end=end)
+        result = _transcribe_and_save(input_path, start=start, end=end,
+                                      batch_size=batch_size)
     local_path = result["input"]
 
     print("\n== Generating candidate segments ==", flush=True)
@@ -217,6 +219,9 @@ def main():
                          "corner (top-left/tr/bottom-left/br/...); omit to auto-detect")
     ap.add_argument("--facecam-frac", type=float, default=0.4,
                     help="top share of the frame for the facecam with --split (default 0.4)")
+    ap.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                    help=f"transcription batch size (default {BATCH_SIZE}; lower if you hit "
+                         f"GPU out-of-memory, 1 = sequential)")
     ap.add_argument("--captions", dest="captions", action="store_true", default=True,
                     help="burn TikTok-style captions into each clip (default on)")
     ap.add_argument("--no-captions", dest="captions", action="store_false",
@@ -278,7 +283,8 @@ def main():
                                     args.min, args.max, args.overlap, transcript,
                                     args.captions, args.reframe, args.suggest,
                                     args.energy_weight, args.start, args.end,
-                                    args.layout, args.facecam, args.facecam_frac)
+                                    args.layout, args.facecam, args.facecam_frac,
+                                    args.batch_size)
             all_outs.extend(outs)
         except Exception as e:
             msg = f"{inp}: {type(e).__name__}: {e}"

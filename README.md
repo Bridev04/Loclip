@@ -61,6 +61,11 @@ appears in the repo root. Spot-check that `duration` and `word_count` look
 sane and that a few `words` timestamps line up with what's said. Use
 `--output` to write elsewhere. Only transcribe content you have the rights to.
 
+Transcription uses faster-whisper's **batched GPU inference** by default (same
+`large-v3` model/accuracy, ~2–3× faster than one-window-at-a-time). If you hit
+GPU out-of-memory, lower `--batch-size` (default 8; `1` = sequential). Batch
+size is also a `main.py` flag.
+
 To transcribe just a slice of a long video, add `--start` / `--end` (`SS`,
 `MM:SS`, or `HH:MM:SS`); word timestamps are still written in absolute source
 time, and a `range` field records the window:
@@ -292,6 +297,7 @@ is transcribed).
 | `--split` | off | streamer layout: facecam on top, gameplay on bottom (overrides reframe) |
 | `--facecam` | auto | facecam region for `--split`: corner, `x,y,w,h` pixels, or fractions |
 | `--facecam-frac` | 0.4 | top share of the frame for the facecam with `--split` |
+| `--batch-size` | 8 | transcription batch size (lower on GPU OOM; `1` = sequential) |
 | `--captions` / `--no-captions` | on | burn TikTok-style captions in vs. skip |
 | `--fit cover\|contain` | cover | static-crop mode (ignored when reframe is on) |
 | `--model` | `claude-haiku-4-5` | Claude model id for scoring |

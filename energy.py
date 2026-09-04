@@ -42,16 +42,17 @@ HOP = 512             # analysis hop for RMS / onset envelopes
 DEFAULT_ENERGY_WEIGHT = 0.3
 
 
-def _extract_wav(video_path: str) -> str:
+def _extract_wav(video_path: str, start: float = None, end: float = None) -> str:
     """Extract a 16 kHz mono WAV, reusing transcribe.py's ffmpeg path.
 
     Decoding once here (rather than letting librosa/audioread open the mp4)
     keeps us on the same audio the transcript was built from and avoids a
-    second, slower video decode.
+    second, slower video decode. Passing start/end limits the extract to the
+    span we actually score, so a short window of a long video stays cheap.
     """
     from transcribe import extract_audio
     tmp_wav = os.path.join(tempfile.gettempdir(), "clipper_energy_audio.wav")
-    return extract_audio(video_path, tmp_wav)
+    return extract_audio(video_path, tmp_wav, start=start, end=end)
 
 
 def _minmax(vals: list) -> list:
@@ -92,7 +93,13 @@ def compute_energies(video_path: str, candidates: list, sr: int = SR,
     import librosa
     import numpy as np
 
-    wav = _extract_wav(video_path)
+    # Only decode/analyze the span the candidates actually cover (with a small
+    # pad), not the whole source -- a big saving when clipping a window of a long
+    # video. Frame indices below are taken relative to this span's start.
+    lo = max(0.0, min(c["start"] for c in candidates) - 0.5)
+    hi = max(c["end"] for c in candidates) + 0.5
+
+    wav = _extract_wav(video_path, start=lo, end=hi)
     try:
         y, sr = librosa.load(wav, sr=sr, mono=True)
     finally:
@@ -104,8 +111,8 @@ def compute_energies(video_path: str, candidates: list, sr: int = SR,
 
     ids, rms_mean, rms_peak, ons_mean, ons_peak = [], [], [], [], []
     for c in candidates:
-        s_frame = int(c["start"] * sr / hop)
-        e_frame = int(c["end"] * sr / hop)
+        s_frame = int((c["start"] - lo) * sr / hop)
+        e_frame = int((c["end"] - lo) * sr / hop)
         rm, rp = _slice_stats(rms, s_frame, e_frame)
         om, op = _slice_stats(onset, s_frame, e_frame)
         ids.append(c["id"])
