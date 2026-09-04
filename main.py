@@ -3,18 +3,27 @@ Local Clipper pipeline entry point.
 
 Modes:
     --n N    Full pipeline: transcribe -> generate candidate segments -> score
-             them with Claude -> cut the top N into 9:16 vertical clips.
+             them with Claude -> reframe + caption -> cut the top N into 9:16
+             vertical clips. Add --suggest for a title/description/hashtags .txt
+             next to each clip.
     --dumb   Thin end-to-end slice: transcribe, then blindly cut the first 45s.
              No scoring -- kept as a plumbing smoke test.
+
+--input may be a single video, a video URL, OR a folder of videos (batch: every
+video in the folder is run through the pipeline).
 
 Standalone:
     venv\\Scripts\\python.exe main.py --input C:\\path\\to\\video.mp4 --n 5
     venv\\Scripts\\python.exe main.py --input https://www.youtube.com/watch?v=... --n 5
+    venv\\Scripts\\python.exe main.py --input C:\\path\\to\\videos_folder --n 5 --suggest
     venv\\Scripts\\python.exe main.py --input C:\\path\\to\\video.mp4 --dumb
 """
 
 import argparse
+import glob
 import json
+import os
+import re
 import sys
 
 from transcribe import transcribe, OUTPUT as TRANSCRIPT_OUT, _fmt_hms
@@ -24,6 +33,23 @@ from cut import cut_segment, OUTPUT_DIR, _safe_stem
 from captions import load_style
 
 DUMB_CLIP_SECONDS = 45.0
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv"}
+
+
+def _gather_inputs(input_path: str) -> list:
+    """Expand --input into a list of inputs. A folder -> every video file in it
+    (sorted); a URL or single file -> itself; None -> [None] (transcript reuse)."""
+    if not input_path:
+        return [None]
+    if re.match(r"^https?://", input_path, re.IGNORECASE):
+        return [input_path]
+    if os.path.isdir(input_path):
+        files = [p for p in sorted(glob.glob(os.path.join(input_path, "*")))
+                 if os.path.splitext(p)[1].lower() in VIDEO_EXTS]
+        if not files:
+            raise RuntimeError(f"No video files found in folder: {input_path}")
+        return files
+    return [input_path]
 
 
 def _transcribe_and_save(input_path: str) -> dict:
@@ -56,7 +82,7 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  model: str = DEFAULT_MODEL, min_len: float = None,
                  max_len: float = None, overlap: float = 0.5,
                  transcript_path: str = None, captions: bool = True,
-                 reframe: bool = True) -> list:
+                 reframe: bool = True, suggest: bool = False) -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
@@ -66,6 +92,8 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
     When reframe=True (default) each clip's 9:16 crop follows the main speaker
     (face tracking, with a static-crop fallback). When captions=True (default)
     each clip gets TikTok-style burned-in captions from the word timestamps.
+    When suggest=True, a title/description/hashtags .txt is written next to each
+    clip (one extra Haiku call per clip; a failure is warned, not fatal).
     """
     if transcript_path:
         print(f"== Reusing transcript {transcript_path} ==", flush=True)
@@ -98,10 +126,12 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
 
     words = result["words"] if captions else None
     style = load_style() if captions else None
+    text_by_id = {c["id"]: c["text"] for c in candidates}
 
     print(f"\n== Cutting top {len(top)} clips "
           f"(reframe={'on' if reframe else 'off'}, "
-          f"captions={'on' if captions else 'off'}) ==", flush=True)
+          f"captions={'on' if captions else 'off'}, "
+          f"suggest={'on' if suggest else 'off'}) ==", flush=True)
     stem = _safe_stem(local_path)
     outs = []
     for i, r in enumerate(top, 1):
@@ -111,10 +141,28 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                           out_path=out_path, captions=captions, words=words,
                           style=style, reframe=reframe)
         outs.append(out)
+        if suggest:
+            _write_suggestion(out, text_by_id.get(r["id"], ""))
     return outs
 
 
+def _write_suggestion(clip_path: str, clip_text: str):
+    """Best-effort per-clip title/description/hashtags .txt. Never fatal."""
+    from suggest import suggest_metadata, write_suggestion
+    try:
+        meta = suggest_metadata(clip_text)
+        txt = write_suggestion(clip_path, meta)
+        print(f"    suggest -> {txt}: {meta['title']}", flush=True)
+    except Exception as e:
+        print(f"    suggest skipped ({type(e).__name__}: {e})", flush=True)
+
+
 def main():
+    # --suggest copy can include emoji; keep the Windows console from choking.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description="Local Clipper pipeline")
     ap.add_argument("--input", default=None, help="local video path or a video URL (e.g. YouTube)")
     ap.add_argument("--n", type=int, default=None,
@@ -138,6 +186,8 @@ def main():
                     help="burn TikTok-style captions into each clip (default on)")
     ap.add_argument("--no-captions", dest="captions", action="store_false",
                     help="skip caption burn-in")
+    ap.add_argument("--suggest", action="store_true",
+                    help="write a title/description/hashtags .txt next to each clip (Claude)")
     args = ap.parse_args()
 
     if args.dumb and args.n is not None:
@@ -148,24 +198,52 @@ def main():
               file=sys.stderr)
         sys.exit(2)
     if not args.input and not args.transcript:
-        print("ERROR: pass --input (video/URL), or --transcript to reuse an existing one.",
+        print("ERROR: pass --input (video/URL/folder), or --transcript to reuse an existing one.",
               file=sys.stderr)
         sys.exit(2)
 
     try:
-        if args.dumb:
-            outs = run_dumb(args.input, args.fit)
-        else:
-            outs = run_pipeline(args.input, args.n, args.fit, args.model,
-                                args.min, args.max, args.overlap, args.transcript,
-                                args.captions, args.reframe)
+        inputs = _gather_inputs(args.input)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\nDone. {len(outs)} clip(s) in ./{OUTPUT_DIR}:", flush=True)
-    for o in outs:
+    batch = len(inputs) > 1
+    if batch:
+        print(f"== Batch: {len(inputs)} videos ==", flush=True)
+        if args.transcript:
+            print("Note: --transcript is ignored for a folder (each video is transcribed).",
+                  flush=True)
+
+    all_outs, failures = [], []
+    for idx, inp in enumerate(inputs, 1):
+        if batch:
+            print(f"\n===== [{idx}/{len(inputs)}] {inp} =====", flush=True)
+        try:
+            if args.dumb:
+                outs = run_dumb(inp, args.fit)
+            else:
+                # --transcript reuse only makes sense for a single input.
+                transcript = None if batch else args.transcript
+                outs = run_pipeline(inp, args.n, args.fit, args.model,
+                                    args.min, args.max, args.overlap, transcript,
+                                    args.captions, args.reframe, args.suggest)
+            all_outs.extend(outs)
+        except Exception as e:
+            msg = f"{inp}: {type(e).__name__}: {e}"
+            if not batch:
+                print(f"ERROR: {msg}", file=sys.stderr)
+                sys.exit(1)
+            print(f"ERROR (skipping): {msg}", file=sys.stderr)
+            failures.append(msg)
+
+    print(f"\nDone. {len(all_outs)} clip(s) in ./{OUTPUT_DIR}:", flush=True)
+    for o in all_outs:
         print(f"  {o}", flush=True)
+    if failures:
+        print(f"\n{len(failures)} video(s) failed:", flush=True)
+        for m in failures:
+            print(f"  {m}", flush=True)
 
 
 if __name__ == "__main__":

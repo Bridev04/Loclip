@@ -205,6 +205,52 @@ Inspect the generated subtitles directly (no encode) with:
 venv\Scripts\python.exe captions.py --transcript transcript.json --start 1278.6 --end 1302.36 --out sample.ass
 ```
 
+### Phase 8 — orchestration & polish (batch + suggestions)
+The full pipeline in one command, over a single video **or a whole folder**, with
+optional AI-generated posting metadata per clip.
+
+```bash
+# one video (transcribe -> score -> reframe -> caption -> export):
+venv\Scripts\python.exe main.py --input path\to\video.mp4 --n 5
+
+# a FOLDER of videos (each is transcribed and clipped; failures are skipped,
+# not fatal, and reported at the end):
+venv\Scripts\python.exe main.py --input path\to\videos_folder --n 5
+
+# add per-clip title/description/hashtags saved next to each clip:
+venv\Scripts\python.exe main.py --input path\to\video.mp4 --n 5 --suggest
+```
+
+`--suggest` asks `claude-haiku-4-5` (prompt in `prompts/suggest.txt`) for a
+title, description, and hashtags from each clip's transcript and writes them to a
+`.txt` beside the clip (e.g. `..._rank01_....mp4` → `..._rank01_....txt`). It's
+best-effort: a suggestion failure warns and moves on, it never loses you a clip.
+Test it on one window without cutting anything:
+
+```bash
+venv\Scripts\python.exe suggest.py --transcript transcript.json --start 53.24 --end 76.4
+```
+
+Batch notes: folder inputs are matched by extension (`.mp4 .mov .mkv .webm .avi
+.m4v .flv .wmv`); each video's clips are named by its own stem so they don't
+collide in `/output`. `--transcript` reuse is ignored for a folder (every video
+is transcribed).
+
+#### Every `main.py` flag
+| Flag | Default | Meaning |
+|---|---|---|
+| `--input` | — | video file, video URL, **or a folder** of videos |
+| `--n N` | — | full pipeline: cut the top N scored clips |
+| `--dumb` | — | plumbing slice: transcribe then cut the first 45s (no scoring) |
+| `--suggest` | off | write a title/description/hashtags `.txt` per clip (Claude) |
+| `--reframe` / `--no-reframe` | on | face-track the speaker vs. static center crop |
+| `--captions` / `--no-captions` | on | burn TikTok-style captions in vs. skip |
+| `--fit cover\|contain` | cover | static-crop mode (ignored when reframe is on) |
+| `--model` | `claude-haiku-4-5` | Claude model id for scoring |
+| `--min` / `--max` | 20 / 90 | candidate window length bounds (s) |
+| `--overlap` | 0.5 | max overlap between chosen clips (`1.0` disables dedup) |
+| `--transcript` | — | reuse an existing `transcript.json` (single input only) |
+
 ### Resolving input on its own
 ```bash
 venv\Scripts\python.exe ingest.py --input https://www.youtube.com/watch?v=...
