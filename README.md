@@ -40,6 +40,22 @@ GPU). Expect **all four checks to report PASS**. First run downloads the large-v
 Whisper weights (~3 GB), so give it a minute. Only clip content you have the
 rights to.
 
+### Phase 2 — transcription
+Resolves `--input` (local path or URL), extracts a 16 kHz mono WAV with ffmpeg,
+runs faster-whisper large-v3 (int8) on the GPU with word timestamps, and writes
+`transcript.json` (full text plus a `words` list of `{word, start, end}`).
+
+```bash
+venv\Scripts\python.exe transcribe.py --input path\to\video.mp4
+# or a URL:
+venv\Scripts\python.exe transcribe.py --input https://www.youtube.com/watch?v=...
+```
+
+On success it prints the total duration and word count, and `transcript.json`
+appears in the repo root. Spot-check that `duration` and `word_count` look
+sane and that a few `words` timestamps line up with what's said. Use
+`--output` to write elsewhere. Only transcribe content you have the rights to.
+
 ### Resolving input on its own
 ```bash
 venv\Scripts\python.exe ingest.py --input https://www.youtube.com/watch?v=...
