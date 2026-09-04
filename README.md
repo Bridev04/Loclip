@@ -294,27 +294,40 @@ venv\Scripts\python.exe energy.py --input media\j2rszuZ-9PY.mp4
 It prints every candidate sorted by energy (highest first). Spot-check that
 laugh/applause/emphatic moments score high and flat, quiet passages score low.
 
-### Reviewing clips — local gallery
-`serve.py` is a small, **local, read-only** web page for eyeballing the clips in
-`/output` after a run. Each clip gets a 9:16 player; its rank/score/time-range
-are parsed from the filename, and the `--suggest` caption (if the sibling `.txt`
-exists) shows under "suggested caption". Stdlib only — no extra dependency — and
-it binds `127.0.0.1` (local machine only; no accounts, uploads, or posting, per
-CLAUDE.md).
+### Local web UI — clip and choose
+`serve.py` is a small, **local** web app for driving the whole thing from a
+browser: paste a **video URL or a local file path**, click **Clip**, watch the
+pipeline run (live log), then **pick from the clips it produced**. Below that is
+a gallery of everything already in `/output`. Stdlib only — no extra dependency.
 
 ```bash
 venv\Scripts\python.exe serve.py
-# then it opens http://127.0.0.1:8000/ in your browser (Ctrl+C to stop)
+# opens http://127.0.0.1:8000/ in your browser (Ctrl+C to stop)
 ```
+
+- **Clip** runs the same `main.py` pipeline (transcribe → score → energy blend →
+  reframe → caption) as a subprocess and streams its output to the page. A URL
+  is downloaded first (yt-dlp). Set how many clips with the **clips** field and
+  tick **caption suggestions** for the `--suggest` metadata.
+- When it finishes, the new clips appear under **Pick your clips** with a
+  checkbox on each — tick the ones you want and **Download selected**, or grab
+  them individually. Reload to fold them into the gallery below.
+- Each clip (results and gallery) gets a 9:16 player with its rank/score/time-
+  range parsed from the filename and the `--suggest` caption when the sibling
+  `.txt` exists.
+
+It's **local and single-user**, consistent with CLAUDE.md: binds `127.0.0.1`
+(this machine only), no accounts, no uploads, and it never posts anywhere —
+"choose" means review / select / download, then you upload manually. Only clip
+content you have the rights to. HTTP Range is supported so the players scrub
+properly; on Windows it pulls the real PATH from the registry so the spawned
+pipeline finds ffmpeg / yt-dlp even if you launched the server from a shell with
+a stale PATH.
 
 Useful flags:
 - `--output <dir>` — folder of clips to serve (default `output`).
 - `--port <n>` — localhost port (default `8000`).
 - `--no-open` — don't auto-open a browser tab.
-
-The folder is re-read on every page load, so after re-running the pipeline just
-**refresh** to see the new clips. HTTP Range requests are supported, so scrubbing
-and seeking in the player work. Videos and downloads stay on your machine.
 
 ### Resolving input on its own
 ```bash
