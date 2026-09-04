@@ -56,6 +56,34 @@ appears in the repo root. Spot-check that `duration` and `word_count` look
 sane and that a few `words` timestamps line up with what's said. Use
 `--output` to write elsewhere. Only transcribe content you have the rights to.
 
+### Phase 3 — cut + 9:16 reframe
+Cuts a `[--start, --end]` segment (seconds), reframes it to a vertical
+1080x1920 (9:16) frame, and encodes with the GPU (`h264_nvenc`) to `/output`.
+
+```bash
+venv\Scripts\python.exe cut.py --input path\to\video.mp4 --start 12 --end 45
+# fit modes: cover (default) fills+crops; contain fits+letterboxes:
+venv\Scripts\python.exe cut.py --input path\to\video.mp4 --start 12 --end 45 --fit contain
+```
+
+The clip lands in `/output` as `<stem>_<start>-<end>_<fit>.mp4`. Spot-check
+with `ffprobe` that width=1080, height=1920, and duration ≈ `end - start`.
+`cover` is the usual vertical-clip look (a landscape source loses its side
+edges); a later phase replaces the static center-crop with face-tracking.
+
+### Full pipeline (dumb end-to-end slice)
+Transcribes the input, then blindly cuts the first 45 seconds into a 9:16 clip
+— the thin end-to-end slice. No moment scoring yet; smarter moment detection
+replaces the "first 45s" rule in a later phase.
+
+```bash
+venv\Scripts\python.exe main.py --input path\to\video.mp4 --dumb
+```
+
+Writes `transcript.json` and one clip to `/output`. If the source is shorter
+than 45s, the clip is truncated to the source length. Pass `--fit contain` to
+letterbox instead of crop.
+
 ### Resolving input on its own
 ```bash
 venv\Scripts\python.exe ingest.py --input https://www.youtube.com/watch?v=...
