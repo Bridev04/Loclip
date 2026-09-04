@@ -249,7 +249,50 @@ is transcribed).
 | `--model` | `claude-haiku-4-5` | Claude model id for scoring |
 | `--min` / `--max` | 20 / 90 | candidate window length bounds (s) |
 | `--overlap` | 0.5 | max overlap between chosen clips (`1.0` disables dedup) |
+| `--energy-weight` | 0.3 | audio-energy share when re-ranking (`0` = pure LLM order); see Phase 5 |
 | `--transcript` | — | reuse an existing `transcript.json` (single input only) |
+
+### Phase 5 — audio-energy re-ranking
+`energy.py` adds a **local, CPU** perception signal that Claude's text-only
+scoring can't see: how *loud* and *punchy* each candidate actually sounds.
+Using librosa it derives, per candidate, an energy score from RMS loudness
+(mean + a high percentile) and onset/peak strength — so laughs, applause, and
+emphatic delivery register — then normalizes those to 0–1 **across this video's
+own candidates**. It blends that with the LLM score:
+
+```
+blended = w * energy + (1 - w) * (llm_score / 100)      # w = --energy-weight, default 0.3
+```
+
+The blend re-ranks candidates **before** the overlap suppression, so a genuinely
+exciting beat can surface even if its transcript text read as unremarkable. This
+is purely additive — it does **not** touch `prompts/score.txt` or the scoring
+call. Energy runs on the CPU, leaving the 8GB VRAM free (CLAUDE.md rule). It's
+on by default in the `--n` pipeline:
+
+```bash
+venv\Scripts\python.exe main.py --transcript transcript.json --n 5
+# lean harder on energy, or turn it off for the old pure-LLM order:
+venv\Scripts\python.exe main.py --transcript transcript.json --n 5 --energy-weight 0.5
+venv\Scripts\python.exe main.py --transcript transcript.json --n 5 --energy-weight 0
+```
+
+The top-picks printout now shows `energy` and `blended` beside each `score`, so
+you can see what the audio signal moved. The blend is best-effort: if the audio
+can't be decoded, it warns and falls back to the pure LLM order rather than
+losing you clips.
+
+Inspect the per-segment energy on its own (no API call, no encode — reads
+`transcript.json` for the candidate windows and the video path):
+
+```bash
+venv\Scripts\python.exe energy.py
+# or point at a specific video:
+venv\Scripts\python.exe energy.py --input media\j2rszuZ-9PY.mp4
+```
+
+It prints every candidate sorted by energy (highest first). Spot-check that
+laugh/applause/emphatic moments score high and flat, quiet passages score low.
 
 ### Resolving input on its own
 ```bash

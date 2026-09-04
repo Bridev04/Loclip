@@ -29,6 +29,7 @@ import sys
 from transcribe import transcribe, OUTPUT as TRANSCRIPT_OUT, _fmt_hms
 from segments import generate_segments
 from score import score_segments, select_top_distinct, DEFAULT_MODEL
+from energy import compute_energies, blend_scores, DEFAULT_ENERGY_WEIGHT
 from cut import cut_segment, OUTPUT_DIR, _safe_stem
 from captions import load_style
 
@@ -82,7 +83,8 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  model: str = DEFAULT_MODEL, min_len: float = None,
                  max_len: float = None, overlap: float = 0.5,
                  transcript_path: str = None, captions: bool = True,
-                 reframe: bool = True, suggest: bool = False) -> list:
+                 reframe: bool = True, suggest: bool = False,
+                 energy_weight: float = DEFAULT_ENERGY_WEIGHT) -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
@@ -116,13 +118,32 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
 
     print(f"\n== Scoring with {model} ==", flush=True)
     ranked = score_segments(candidates, model)
+
+    # Phase 5: blend a local audio-energy signal into the ranking BEFORE overlap
+    # suppression, so a genuinely punchy beat (laughs, emphatic delivery) can
+    # surface even when the transcript text alone read as unremarkable. Energy
+    # is CPU/librosa perception -- the VRAM stays free. Best-effort: a decode or
+    # librosa failure falls back to the pure LLM order rather than losing clips.
+    if energy_weight > 0:
+        print(f"\n== Blending audio energy (weight {energy_weight:g}) ==", flush=True)
+        try:
+            energies = compute_energies(local_path, candidates)
+            ranked = blend_scores(ranked, energies, energy_weight)
+            print(f"Re-ranked {len(ranked)} candidates by blended score.", flush=True)
+        except Exception as e:
+            print(f"WARNING: energy blend skipped ({type(e).__name__}: {e}); "
+                  f"using LLM order.", file=sys.stderr, flush=True)
+
     # Greedy overlap suppression so the top N are distinct moments, not several
     # cuts of the same hot moment. --overlap 1.0 disables it (pure top-N).
     top = select_top_distinct(ranked, n, overlap)
     print(f"Top picks (from {len(ranked)} scored, overlap<={overlap:g}):", flush=True)
     for i, r in enumerate(top, 1):
-        print(f"  #{i}  score {r['score']:>3}  {r['start']:>7.2f}-{r['end']:>7.2f}s  {r['reason']}",
-              flush=True)
+        extra = ""
+        if "blended" in r:
+            extra = f" energy {r['energy']:.2f} blended {r['blended']:.2f}"
+        print(f"  #{i}  score {r['score']:>3}{extra}  "
+              f"{r['start']:>7.2f}-{r['end']:>7.2f}s  {r['reason']}", flush=True)
 
     words = result["words"] if captions else None
     style = load_style() if captions else None
@@ -188,6 +209,9 @@ def main():
                     help="skip caption burn-in")
     ap.add_argument("--suggest", action="store_true",
                     help="write a title/description/hashtags .txt next to each clip (Claude)")
+    ap.add_argument("--energy-weight", type=float, default=DEFAULT_ENERGY_WEIGHT,
+                    help="audio-energy share when re-ranking, 0..1 "
+                         f"(default {DEFAULT_ENERGY_WEIGHT:g}; 0 = pure LLM order)")
     args = ap.parse_args()
 
     if args.dumb and args.n is not None:
@@ -227,7 +251,8 @@ def main():
                 transcript = None if batch else args.transcript
                 outs = run_pipeline(inp, args.n, args.fit, args.model,
                                     args.min, args.max, args.overlap, transcript,
-                                    args.captions, args.reframe, args.suggest)
+                                    args.captions, args.reframe, args.suggest,
+                                    args.energy_weight)
             all_outs.extend(outs)
         except Exception as e:
             msg = f"{inp}: {type(e).__name__}: {e}"
