@@ -6,6 +6,11 @@ paste a video URL or a local file path, click Clip, watch the pipeline run
 (live log), then pick from the clips it produced. Below that is a gallery of
 everything already in /output.
 
+It also has a visual Trimmer at /editor: pick a downloaded video (or paste a
+link to fetch one), scrub it on a timeline with a thumbnail filmstrip + audio
+waveform, drag in/out handles, and cut that exact window to a 9:16 clip
+(optionally face-track reframe or facecam split). ffmpeg builds the previews.
+
 Consistent with CLAUDE.md: it binds 127.0.0.1 (this machine only), has no
 accounts, no uploads, and never posts anywhere — "choose from those" means
 review / select / download locally, then you upload manually. Clipping just runs
@@ -23,18 +28,26 @@ Standalone:
 """
 
 import argparse
+import hashlib
 import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+MEDIA_DIR = "media"  # source videos (downloads land here) for the trimmer
+# Timeline previews (waveform + thumbnail filmstrip) are generated with ffmpeg
+# and cached here, keyed by source file size+mtime.
+PREVIEW_DIR = os.path.join(tempfile.gettempdir(), "loclip_previews")
+FILMSTRIP_COUNT = 48
 # Filenames from the --n pipeline: <stem>_rank01_score71_47.59-87.57.mp4
 _RANK_RE = re.compile(r"_rank(\d+)_score(\d+)_([\d.]+)-([\d.]+)\.[^.]+$")
 # Filenames from cut.py / --dumb: <stem>_47.59-87.57_cover.mp4 (no rank/score)
@@ -47,6 +60,159 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # --- Job state (single-user, so one job at a time) -------------------------
 _JOB_LOCK = threading.Lock()
 JOB = {"status": "idle", "input": "", "n": 0, "log": [], "clips": []}
+
+# --- Trimmer: source videos, timeline previews, URL download ---------------
+_INFO_CACHE = {}
+_PREVIEWS = {}                     # name -> {"status": building|ready|error}
+_PREVIEW_LOCK = threading.Lock()
+_DL = {"status": "idle", "input": "", "name": "", "log": []}
+_DL_LOCK = threading.Lock()
+
+
+def _source_path(name: str):
+    """Absolute path of a source video in MEDIA_DIR, or None (traversal-safe)."""
+    name = os.path.basename(name)
+    base = os.path.abspath(MEDIA_DIR)
+    full = os.path.abspath(os.path.join(base, name))
+    if os.path.commonpath([base, full]) != base or not os.path.isfile(full):
+        return None
+    return full
+
+
+def list_sources() -> list:
+    """Video files in MEDIA_DIR, newest first, as {name, size}."""
+    try:
+        names = os.listdir(MEDIA_DIR)
+    except FileNotFoundError:
+        return []
+    out = []
+    for n in names:
+        p = os.path.join(MEDIA_DIR, n)
+        if os.path.isfile(p) and os.path.splitext(n)[1].lower() in VIDEO_EXTS:
+            out.append({"name": n, "size": os.path.getsize(p),
+                        "mtime": os.path.getmtime(p)})
+    out.sort(key=lambda c: c["mtime"], reverse=True)
+    return [{"name": c["name"], "size": c["size"]} for c in out]
+
+
+def source_info(name: str):
+    """{width, height, duration} for a source, via ffprobe (cached)."""
+    if name in _INFO_CACHE:
+        return _INFO_CACHE[name]
+    full = _source_path(name)
+    probe = shutil.which("ffprobe")
+    info = {"width": 0, "height": 0, "duration": 0.0}
+    if full and probe:
+        try:
+            out = subprocess.run(
+                [probe, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height",
+                 "-show_entries", "format=duration", "-of", "json", full],
+                capture_output=True, text=True)
+            d = json.loads(out.stdout or "{}")
+            st = (d.get("streams") or [{}])[0]
+            info = {"width": int(st.get("width", 0) or 0),
+                    "height": int(st.get("height", 0) or 0),
+                    "duration": round(float((d.get("format") or {}).get("duration", 0) or 0), 3)}
+        except (ValueError, OSError):
+            pass
+    if full:
+        _INFO_CACHE[name] = info
+    return info
+
+
+def _preview_paths(name: str):
+    full = _source_path(name)
+    if not full:
+        return None, None
+    st = os.stat(full)
+    key = hashlib.sha1(f"{name}|{st.st_size}|{int(st.st_mtime)}".encode()).hexdigest()[:16]
+    return (os.path.join(PREVIEW_DIR, key + "_wave.png"),
+            os.path.join(PREVIEW_DIR, key + "_strip.jpg"))
+
+
+def _build_previews(name: str):
+    """Generate the waveform PNG and thumbnail-strip JPG for a source (ffmpeg)."""
+    full = _source_path(name)
+    ffmpeg = shutil.which("ffmpeg")
+    wave, strip = _preview_paths(name)
+    if not full or not ffmpeg or not wave:
+        with _PREVIEW_LOCK:
+            _PREVIEWS[name] = {"status": "error"}
+        return
+    os.makedirs(PREVIEW_DIR, exist_ok=True)
+    dur = source_info(name)["duration"]
+    try:
+        if not os.path.exists(wave):
+            subprocess.run(
+                [ffmpeg, "-y", "-i", full, "-filter_complex",
+                 "aformat=channel_layouts=mono,showwavespic=s=1600x80:colors=#7c9cff",
+                 "-frames:v", "1", wave], capture_output=True, text=True)
+        if not os.path.exists(strip) and dur > 0:
+            fps = max(FILMSTRIP_COUNT / dur, 0.02)
+            subprocess.run(
+                [ffmpeg, "-y", "-i", full, "-vf",
+                 f"fps={fps:.6f},scale=-1:80,tile={FILMSTRIP_COUNT}x1",
+                 "-frames:v", "1", "-q:v", "4", strip], capture_output=True, text=True)
+        status = "ready" if os.path.exists(wave) else "error"
+    except OSError:
+        status = "error"
+    with _PREVIEW_LOCK:
+        _PREVIEWS[name] = {"status": status}
+
+
+def ensure_previews(name: str) -> str:
+    """Kick off preview generation if needed; return building|ready|error."""
+    wave, _ = _preview_paths(name)
+    if wave and os.path.exists(wave):
+        return "ready"
+    with _PREVIEW_LOCK:
+        cur = _PREVIEWS.get(name)
+        if cur and cur["status"] in ("building", "ready"):
+            return cur["status"]
+        _PREVIEWS[name] = {"status": "building"}
+    threading.Thread(target=_build_previews, args=(name,), daemon=True).start()
+    return "building"
+
+
+def _run_download(input_value: str):
+    """Download a URL (or resolve a local path) into MEDIA_DIR via ingest.py."""
+    with _DL_LOCK:
+        _DL.update(status="running", input=input_value, name="", log=[])
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "ingest.py", "--input", input_value], cwd=HERE,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            bufsize=1, encoding="utf-8", errors="replace")
+        for line in proc.stdout:
+            _DL["log"].append(line.rstrip("\n"))
+        proc.wait()
+    except Exception as e:  # spawning ingest failed
+        _DL["log"].append(f"ERROR: {type(e).__name__}: {e}")
+        _DL.update(status="error")
+        return
+    # ingest.py prints the resolved local path; find a media/ file in the output.
+    name = ""
+    for line in reversed(_DL["log"]):
+        for m in re.finditer(r"([^\s\"']+\.(?:mp4|mov|mkv|webm|m4v))", line):
+            cand = os.path.basename(m.group(1))
+            if _source_path(cand):
+                name = cand
+                break
+        if name:
+            break
+    if proc.returncode == 0 and name:
+        _DL.update(status="done", name=name)
+    else:
+        _DL.update(status="error")
+
+
+def start_download(input_value: str) -> bool:
+    with _DL_LOCK:
+        if _DL["status"] == "running":
+            return False
+    threading.Thread(target=_run_download, args=(input_value,), daemon=True).start()
+    return True
 
 
 def _augment_path_windows():
@@ -166,7 +332,7 @@ def _clips_from_log(log_lines: list, clips_dir: str) -> list:
 
 def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
              start: str = "", end: str = "", split: bool = False,
-             facecam: str = "", manual: bool = False):
+             facecam: str = "", manual: bool = False, reframe: bool = False):
     """Run the pipeline (or a plain exact cut) as a subprocess, streaming output.
 
     manual=True cuts exactly [start, end] via cut.py (no transcription/scoring)
@@ -178,6 +344,8 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
             args += ["--layout", "split"]
             if facecam:
                 args += ["--facecam", facecam]
+        elif reframe:
+            args += ["--reframe"]
     else:
         args = [sys.executable, "main.py", "--input", input_value, "--n", str(n)]
         if suggest:
@@ -215,7 +383,7 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
 
 def start_job(input_value: str, n: int, suggest: bool, clips_dir: str,
               start: str = "", end: str = "", split: bool = False,
-              facecam: str = "", manual: bool = False) -> bool:
+              facecam: str = "", manual: bool = False, reframe: bool = False) -> bool:
     """Start a clip job if none is running. Returns False if one already is."""
     with _JOB_LOCK:
         if JOB["status"] == "running":
@@ -223,7 +391,8 @@ def start_job(input_value: str, n: int, suggest: bool, clips_dir: str,
         JOB.update(status="running", input=input_value, n=n, log=[], clips=[])
     threading.Thread(
         target=_run_job,
-        args=(input_value, n, suggest, clips_dir, start, end, split, facecam, manual),
+        args=(input_value, n, suggest, clips_dir, start, end, split, facecam,
+              manual, reframe),
         daemon=True).start()
     return True
 
@@ -349,6 +518,7 @@ def render_page(clips_dir: str) -> bytes:
 <body>
 <header>
   <h1>Local Clipper</h1>
+  <a href="/editor" style="color:var(--accent);text-decoration:none;font-size:13px">✂ Trim a video</a>
   <span class="path">{html.escape(abs_dir)}</span>
 </header>
 <main>
@@ -488,6 +658,242 @@ $('#split').addEventListener('change', e => {{ $('#facecam').disabled = !e.targe
     return page.encode("utf-8")
 
 
+def render_editor() -> bytes:
+    return _EDITOR_HTML.encode("utf-8")
+
+
+_EDITOR_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trimmer — Local Clipper</title>
+<style>
+  :root { --bg:#0f1115; --panel:#151821; --card:#1a1d24; --line:#2a2e37; --text:#e8eaed;
+    --dim:#9aa0aa; --accent:#7c9cff; --score:#3ecf8e; --err:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif; }
+  a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; gap:14px; align-items:baseline; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  main { max-width:1100px; margin:0 auto; padding:24px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:18px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  input[type=text], select { padding:9px 11px; font-size:14px; background:#0b0d11;
+    border:1px solid var(--line); border-radius:8px; color:var(--text); }
+  input#url { flex:1; min-width:240px; } select#src { min-width:240px; flex:1; }
+  input.time { width:110px; text-align:center; }
+  label.opt { color:var(--dim); display:flex; align-items:center; gap:6px; }
+  button { padding:9px 16px; font-size:14px; font-weight:600; border:0; border-radius:8px;
+    background:var(--accent); color:#0b0d11; cursor:pointer; }
+  button.ghost { background:#222736; color:var(--text); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  .hint { color:var(--dim); font-size:12px; }
+  video { width:100%; max-height:52vh; background:#000; border-radius:10px; display:block; }
+  /* timeline */
+  .tl { position:relative; height:92px; margin-top:14px; border:1px solid var(--line);
+    border-radius:8px; overflow:hidden; background:#0b0d11; user-select:none; touch-action:none; cursor:pointer; }
+  .tl .film { position:absolute; inset:0 0 42px 0; background-size:100% 100%; background-repeat:no-repeat; background-color:#0b0d11; }
+  .tl .wave { position:absolute; left:0; right:0; bottom:0; height:42px; width:100%; object-fit:fill; opacity:.85; background:#0b0d11; }
+  .tl .sel { position:absolute; top:0; bottom:0; background:rgba(124,156,255,.22);
+    border-left:2px solid var(--accent); border-right:2px solid var(--accent); }
+  .tl .dim { position:absolute; top:0; bottom:0; background:rgba(11,13,17,.6); }
+  .tl .handle { position:absolute; top:0; bottom:0; width:12px; margin-left:-6px; cursor:ew-resize; z-index:3; }
+  .tl .handle::after { content:''; position:absolute; left:5px; top:0; bottom:0; width:2px; background:var(--accent); }
+  .tl .play { position:absolute; top:0; bottom:0; width:2px; background:#fff; z-index:2; pointer-events:none; }
+  .times { display:flex; gap:16px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  .badge { font-size:12px; font-weight:600; padding:2px 8px; border-radius:999px; background:rgba(124,156,255,.18); color:var(--accent); }
+  pre.log { background:#0b0d11; border:1px solid var(--line); border-radius:8px; padding:10px; max-height:150px;
+    overflow:auto; font:12px/1.5 ui-monospace,Consolas,monospace; white-space:pre-wrap; margin:10px 0 0; }
+  #result video { max-height:40vh; width:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Local Clipper — Trimmer</h1>
+  <a href="/">‹ Clips gallery</a>
+</header>
+<main>
+  <div class="panel">
+    <div class="row">
+      <select id="src"><option value="">— pick a downloaded video —</option></select>
+      <button id="load">Load</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="url" placeholder="…or paste a video URL / local path to download">
+      <button id="get" class="ghost">Download</button>
+    </div>
+    <div class="hint" id="srchint" style="margin-top:8px">Pick a video you've already downloaded, or paste a link to add one. Trimming happens on your machine; nothing is uploaded.</div>
+    <pre class="log" id="dllog" hidden></pre>
+  </div>
+
+  <div class="panel" id="editor" hidden>
+    <video id="vid" preload="metadata" playsinline></video>
+    <div class="tl" id="tl">
+      <div class="film" id="film"></div>
+      <img class="wave" id="wave" alt="">
+      <div class="dim" id="dimL"></div>
+      <div class="dim" id="dimR"></div>
+      <div class="sel" id="sel"></div>
+      <div class="handle" id="hIn"></div>
+      <div class="handle" id="hOut"></div>
+      <div class="play" id="ph"></div>
+    </div>
+    <div class="times">
+      <button id="pp" class="ghost">▶ Play</button>
+      <button id="setin" class="ghost">Set In [</button>
+      <span class="badge">in <input class="time" id="tin" value="0:00"></span>
+      <span class="badge">out <input class="time" id="tout" value="0:30"></span>
+      <button id="setout" class="ghost">Set Out ]</button>
+      <label class="opt"><input type="checkbox" id="loop" checked> loop selection</label>
+      <span class="hint" id="dur"></span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label class="opt"><input type="checkbox" id="reframe"> face-track reframe</label>
+      <label class="opt"><input type="checkbox" id="split"> facecam split</label>
+      <input type="text" id="facecam" class="time" style="width:200px" placeholder="facecam: auto / corner" disabled>
+      <button id="cut">Cut selection ▸</button>
+      <span class="hint" id="cutstatus"></span>
+    </div>
+    <div class="hint" style="margin-top:8px">Captions come from the auto-pipeline (they need the transcript); a hand-trimmed cut is exported without them. Loudness is normalized automatically.</div>
+    <pre class="log" id="cutlog" hidden></pre>
+    <div id="result" style="margin-top:12px"></div>
+  </div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const vid = $('#vid'), tl = $('#tl');
+let dur = 0, inT = 0, outT = 30, drag = null, name = '', poller = null, dlPoller = null;
+
+const fmt = t => { t = Math.max(0, t); const m = Math.floor(t/60), s = Math.floor(t%60);
+  return m + ':' + String(s).padStart(2,'0'); };
+const parseT = v => { v = String(v).trim(); if (v.includes(':')) {
+  return v.split(':').reduce((a,p)=>a*60+(parseFloat(p)||0),0); } return parseFloat(v)||0; };
+
+async function loadSources(sel) {
+  const d = await fetch('/sources').then(r=>r.json()).catch(()=>({sources:[]}));
+  const s = $('#src');
+  s.innerHTML = '<option value="">— pick a downloaded video —</option>' +
+    d.sources.map(o=>`<option value="${o.name}">${o.name}  (${(o.size/1048576).toFixed(0)} MB)</option>`).join('');
+  if (sel) s.value = sel;
+}
+
+function layout() {
+  const w = tl.clientWidth;
+  const px = t => (dur>0 ? (t/dur)*w : 0);
+  $('#sel').style.left = px(inT)+'px';  $('#sel').style.width = Math.max(0,px(outT)-px(inT))+'px';
+  $('#hIn').style.left = px(inT)+'px';  $('#hOut').style.left = px(outT)+'px';
+  $('#dimL').style.left = '0px'; $('#dimL').style.width = px(inT)+'px';
+  $('#dimR').style.left = px(outT)+'px'; $('#dimR').style.width = Math.max(0,w-px(outT))+'px';
+  $('#tin').value = fmt(inT); $('#tout').value = fmt(outT);
+}
+function playhead() { const w = tl.clientWidth; $('#ph').style.left = (dur>0?(vid.currentTime/dur)*w:0)+'px'; }
+
+async function selectSource(n) {
+  name = n; if (!n) return;
+  $('#editor').hidden = false;
+  vid.src = '/source/' + encodeURIComponent(n);
+  const info = await fetch('/sourceinfo/'+encodeURIComponent(n)).then(r=>r.json()).catch(()=>({duration:0}));
+  dur = info.duration || 0;
+  inT = 0; outT = Math.min(30, dur||30);
+  $('#dur').textContent = 'duration ' + fmt(dur);
+  $('#film').style.backgroundImage = ''; $('#wave').removeAttribute('src');
+  layout(); playhead();
+  // build + load timeline previews (waveform + filmstrip)
+  const tick = async () => {
+    const p = await fetch('/previewstatus/'+encodeURIComponent(n)).then(r=>r.json()).catch(()=>({status:'error'}));
+    if (p.status === 'ready') {
+      $('#film').style.backgroundImage = `url(/filmstrip/${encodeURIComponent(n)})`;
+      $('#wave').src = '/waveform/'+encodeURIComponent(n);
+    } else if (p.status === 'building') { setTimeout(tick, 1200); }
+  };
+  tick();
+}
+
+// timeline pointer interaction
+function timeAt(clientX) { const r = tl.getBoundingClientRect();
+  return Math.max(0, Math.min(dur, ((clientX-r.left)/r.width)*dur)); }
+$('#hIn').addEventListener('pointerdown', e=>{ drag='in'; e.preventDefault(); });
+$('#hOut').addEventListener('pointerdown', e=>{ drag='out'; e.preventDefault(); });
+tl.addEventListener('pointerdown', e=>{ if (drag) return;
+  if (e.target.classList.contains('handle')) return;
+  vid.currentTime = timeAt(e.clientX); playhead(); });
+document.addEventListener('pointermove', e=>{ if (!drag) return;
+  const t = timeAt(e.clientX);
+  if (drag==='in') inT = Math.min(t, outT-0.2);
+  else outT = Math.max(t, inT+0.2);
+  layout(); });
+document.addEventListener('pointerup', ()=>{ drag=null; });
+
+vid.addEventListener('timeupdate', ()=>{ playhead();
+  if ($('#loop').checked && vid.currentTime >= outT) { vid.currentTime = inT; }
+});
+vid.addEventListener('loadedmetadata', ()=>{ if (!dur) { dur = vid.duration||0; layout(); } });
+window.addEventListener('resize', ()=>{ layout(); playhead(); });
+
+$('#pp').onclick = ()=>{ if (vid.paused) { if (vid.currentTime<inT||vid.currentTime>outT) vid.currentTime=inT; vid.play(); $('#pp').textContent='❚❚ Pause'; } else { vid.pause(); $('#pp').textContent='▶ Play'; } };
+$('#setin').onclick = ()=>{ inT = Math.min(vid.currentTime, outT-0.2); layout(); };
+$('#setout').onclick = ()=>{ outT = Math.max(vid.currentTime, inT+0.2); layout(); };
+$('#tin').addEventListener('change', ()=>{ inT = Math.max(0, Math.min(parseT($('#tin').value), outT-0.2)); layout(); });
+$('#tout').addEventListener('change', ()=>{ outT = Math.min(dur||1e9, Math.max(parseT($('#tout').value), inT+0.2)); layout(); });
+$('#split').addEventListener('change', e=>{ $('#facecam').disabled = !e.target.checked; });
+document.addEventListener('keydown', e=>{ if (['INPUT','SELECT'].includes(e.target.tagName)) return;
+  if (e.code==='Space'){ e.preventDefault(); $('#pp').click(); }
+  else if (e.key==='i'||e.key==='I'){ $('#setin').click(); }
+  else if (e.key==='o'||e.key==='O'){ $('#setout').click(); } });
+
+$('#src').addEventListener('change', e=>{ if (e.target.value) selectSource(e.target.value); });
+$('#load').onclick = ()=>{ const v=$('#src').value; if (v) selectSource(v); };
+
+$('#get').onclick = async ()=>{
+  const input = $('#url').value.trim(); if (!input) return;
+  $('#get').disabled = true; $('#dllog').hidden = false; $('#dllog').textContent = 'starting…';
+  const res = await fetch('/download', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({input})});
+  if (!res.ok) { $('#dllog').textContent = 'Download busy or failed.'; $('#get').disabled=false; return; }
+  clearInterval(dlPoller);
+  dlPoller = setInterval(async ()=>{
+    const s = await fetch('/downloadstatus').then(r=>r.json());
+    $('#dllog').textContent = s.log; $('#dllog').scrollTop = $('#dllog').scrollHeight;
+    if (s.status !== 'running') { clearInterval(dlPoller); $('#get').disabled=false;
+      if (s.status==='done' && s.name) { await loadSources(s.name); selectSource(s.name); }
+    }
+  }, 1000);
+};
+
+$('#cut').onclick = async ()=>{
+  if (!name) return;
+  $('#cut').disabled = true; $('#cutstatus').textContent = 'Cutting…'; $('#cutstatus').style.color='';
+  $('#cutlog').hidden = false; $('#cutlog').textContent=''; $('#result').innerHTML='';
+  const body = { input: 'media/'+name, manual: true, start: String(inT.toFixed(2)), end: String(outT.toFixed(2)),
+    split: $('#split').checked, facecam: $('#facecam').value.trim() };
+  // reframe (non-split) uses the pipeline's reframe on a manual cut via cut.py? manual path is a plain cut;
+  // for face-track we route through cut.py's --reframe by piggybacking on split=false + reframe flag:
+  body.reframe = $('#reframe').checked;
+  const res = await fetch('/clip', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if (res.status===409){ $('#cutstatus').textContent='A job is already running.'; $('#cut').disabled=false; return; }
+  if (!res.ok){ const j=await res.json().catch(()=>({})); $('#cutstatus').textContent=j.error||'Failed.'; $('#cutstatus').style.color='var(--err)'; $('#cut').disabled=false; return; }
+  clearInterval(poller);
+  poller = setInterval(async ()=>{
+    const s = await fetch('/status').then(r=>r.json());
+    $('#cutlog').textContent = s.log; $('#cutlog').scrollTop = $('#cutlog').scrollHeight;
+    if (s.status!=='running'){ clearInterval(poller); $('#cut').disabled=false;
+      if (s.status==='error'){ $('#cutstatus').textContent='Failed — see log.'; $('#cutstatus').style.color='var(--err)'; }
+      else { const c = s.clips[s.clips.length-1];
+        $('#cutstatus').textContent = 'Done!';
+        if (c) $('#result').innerHTML = `<video controls src="/clips/${encodeURIComponent(c.name)}"></video>`
+          + `<div class="hint" style="margin-top:6px">Saved as <b>${c.name}</b> — also in the <a href="/">gallery</a>. <a class="dl" href="/clips/${encodeURIComponent(c.name)}" download>download</a></div>`;
+      }
+    }
+  }, 1000);
+};
+
+loadSources();
+</script>
+</body>
+</html>"""
+
+
 # --- HTTP ------------------------------------------------------------------
 
 class ClipHandler(BaseHTTPRequestHandler):
@@ -506,23 +912,59 @@ class ClipHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_json(self, obj, code=200):
+        self._send(code, "application/json", json.dumps(obj).encode("utf-8"))
+
     def do_GET(self):
         path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
         if path in ("/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", render_page(self.server.clips_dir))
+        elif path == "/editor":
+            self._send(200, "text/html; charset=utf-8", render_editor())
         elif path == "/status":
             snap = {"status": JOB["status"], "input": JOB["input"],
                     "log": "\n".join(JOB["log"]),
                     "clips": [c for c in (clip_info(self.server.clips_dir, n)
                                           for n in JOB["clips"]) if c]}
-            self._send(200, "application/json", json.dumps(snap).encode("utf-8"))
+            self._send_json(snap)
+        elif path == "/sources":
+            self._send_json({"sources": list_sources()})
+        elif path == "/downloadstatus":
+            self._send_json({"status": _DL["status"], "name": _DL["name"],
+                             "log": "\n".join(_DL["log"][-40:])})
+        elif path.startswith("/sourceinfo/"):
+            self._send_json(source_info(path[len("/sourceinfo/"):]))
+        elif path.startswith("/previewstatus/"):
+            name = path[len("/previewstatus/"):]
+            self._send_json({"status": ensure_previews(name)})
+        elif path.startswith("/waveform/"):
+            wave, _ = _preview_paths(path[len("/waveform/"):])
+            self._serve_image(wave, "image/png")
+        elif path.startswith("/filmstrip/"):
+            _, strip = _preview_paths(path[len("/filmstrip/"):])
+            self._serve_image(strip, "image/jpeg")
         elif path.startswith("/clips/"):
-            self._serve_clip(path[len("/clips/"):])
+            self._serve_file(self.server.clips_dir, path[len("/clips/"):])
+        elif path.startswith("/source/"):
+            self._serve_file(MEDIA_DIR, path[len("/source/"):])
         else:
             self.send_error(404, "Not found")
 
+    def _serve_image(self, full, ctype):
+        if not full or not os.path.isfile(full):
+            self.send_error(404, "Not found")
+            return
+        try:
+            with open(full, "rb") as f:
+                data = f.read()
+        except OSError:
+            self.send_error(404, "Not found")
+            return
+        self._send(200, ctype, data)
+
     def do_POST(self):
-        if urllib.parse.urlparse(self.path).path != "/clip":
+        route = urllib.parse.urlparse(self.path).path
+        if route not in ("/clip", "/download"):
             self.send_error(404, "Not found")
             return
         try:
@@ -531,6 +973,17 @@ class ClipHandler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             self._send(400, "application/json", b'{"error":"bad request"}')
             return
+
+        if route == "/download":
+            inp = str(data.get("input", "")).strip()
+            if not inp:
+                self._send(400, "application/json", b'{"error":"no input"}')
+            elif start_download(inp):
+                self._send(200, "application/json", b'{"status":"started"}')
+            else:
+                self._send(409, "application/json", b'{"error":"a download is already running"}')
+            return
+
         input_value = str(data.get("input", "")).strip()
         if not input_value:
             self._send(400, "application/json", b'{"error":"no input"}')
@@ -544,19 +997,20 @@ class ClipHandler(BaseHTTPRequestHandler):
         split = bool(data.get("split"))
         facecam = str(data.get("facecam", "")).strip()
         manual = bool(data.get("manual"))
+        reframe = bool(data.get("reframe"))
         if manual and not (start and end):
             self._send(400, "application/json", b'{"error":"exact cut needs from and to"}')
             return
         ok = start_job(input_value, n, bool(data.get("suggest")),
-                       self.server.clips_dir, start, end, split, facecam, manual)
+                       self.server.clips_dir, start, end, split, facecam, manual, reframe)
         if not ok:
             self._send(409, "application/json", b'{"error":"a job is already running"}')
         else:
             self._send(200, "application/json", b'{"status":"started"}')
 
-    def _serve_clip(self, name: str):
+    def _serve_file(self, base_dir: str, name: str):
         name = os.path.basename(name)
-        base = os.path.abspath(self.server.clips_dir)
+        base = os.path.abspath(base_dir)
         full = os.path.abspath(os.path.join(base, name))
         if os.path.commonpath([base, full]) != base or not os.path.isfile(full):
             self.send_error(404, "Not found")
