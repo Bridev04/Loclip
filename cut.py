@@ -78,8 +78,16 @@ def cut_segment(input_path: str, start: float, end: float,
                 fit: str = "cover", output_dir: str = OUTPUT_DIR,
                 out_path: str = None, captions: bool = False,
                 words: list = None, style: dict = None,
-                reframe: bool = False, reframe_cfg: dict = None) -> str:
+                reframe: bool = False, reframe_cfg: dict = None,
+                layout: str = None, facecam: str = None,
+                facecam_frac: float = 0.4) -> str:
     """Resolve input, cut [start, end], reframe to 9:16, encode to out_path.
+
+    When layout="split", the clip becomes a streamer-style vertical: the facecam
+    on top and the gameplay on the bottom (see reframe.build_split_filtergraph).
+    The facecam is auto-detected, or set with `facecam` ('x,y,w,h', fractions,
+    or a corner name); `facecam_frac` is the top share (default 0.4). Split
+    overrides `reframe`/`fit`; it falls back to the static crop if no facecam.
 
     When reframe=True, a face-tracking dynamic crop follows the main speaker
     (see reframe.py) instead of the static `fit` crop; it falls back to the
@@ -117,19 +125,38 @@ def cut_segment(input_path: str, start: float, end: float,
         if parent:
             os.makedirs(parent, exist_ok=True)
 
-    # Build the video filter chain. Reframe (dynamic face-tracking crop) or the
-    # static `fit` crop produce the 1080x1920 frame; captions come LAST so the
-    # ass filter draws onto the finished frame.
+    # Build the video filters. The split layout needs a filter_complex (two
+    # streams stacked), everything else a simple -vf chain. Reframe (dynamic
+    # face-tracking crop) or the static `fit` crop produce the 1080x1920 frame.
+    # Captions come LAST either way so the ass filter draws on the finished frame.
+    complex_graph = None   # set for split layout
+    final_label = None
     base_vf = None
-    if reframe:
-        from reframe import build_reframe_vf  # lazy: pulls in cv2/numpy
-        base_vf = build_reframe_vf(local_path, start, end, TARGET_W, TARGET_H,
-                                   reframe_cfg)
+    layout_desc = f"fit={fit}"
+
+    if layout == "split":
+        from reframe import build_split_filtergraph  # lazy: pulls in cv2/numpy
+        res = build_split_filtergraph(local_path, start, end, TARGET_W, TARGET_H,
+                                      facecam=facecam, facecam_frac=facecam_frac,
+                                      overrides=reframe_cfg)
+        if res is None:
+            print("Split: no facecam detected -> static center crop.", flush=True)
+        else:
+            complex_graph, final_label, rect = res
+            layout_desc = f"split facecam={rect} top={facecam_frac:g}"
+
+    if complex_graph is None:
+        if reframe:
+            from reframe import build_reframe_vf  # lazy: pulls in cv2/numpy
+            base_vf = build_reframe_vf(local_path, start, end, TARGET_W, TARGET_H,
+                                       reframe_cfg)
+            if base_vf is None:
+                print("Reframe: no/too-few faces detected -> static center crop.", flush=True)
+            else:
+                layout_desc = "reframe"
         if base_vf is None:
-            print("Reframe: no/too-few faces detected -> static center crop.", flush=True)
-    if base_vf is None:
-        base_vf = FILTERS[fit]
-    vf = base_vf
+            base_vf = FILTERS[fit]
+
     ass_path = None
     if captions:
         if not words:
@@ -140,16 +167,22 @@ def cut_segment(input_path: str, start: float, end: float,
         fd, ass_path = tempfile.mkstemp(suffix=".ass", dir=os.path.dirname(out_path) or ".")
         os.close(fd)
         write_ass(words, start, end, style, ass_path)
-        vf = f"{vf},ass={_ass_filter_path(ass_path)}"
+        ass_filter = f"ass={_ass_filter_path(ass_path)}"
+        if complex_graph is not None:
+            complex_graph = f"{complex_graph};{final_label}{ass_filter}[vout]"
+            final_label = "[vout]"
+        else:
+            base_vf = f"{base_vf},{ass_filter}"
 
     # -ss before -i is a fast seek; because we re-encode, ffmpeg still lands on
     # an accurate frame at `start`. -t is the clip length (end - start).
-    cmd = [
-        ffmpeg, "-y",
-        "-ss", f"{start}",
-        "-i", local_path,
-        "-t", f"{duration}",
-        "-vf", vf,
+    cmd = [ffmpeg, "-y", "-ss", f"{start}", "-i", local_path, "-t", f"{duration}"]
+    if complex_graph is not None:
+        # -map the composited video and the source audio (if any).
+        cmd += ["-filter_complex", complex_graph, "-map", final_label, "-map", "0:a?"]
+    else:
+        cmd += ["-vf", base_vf]
+    cmd += [
         "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k",
@@ -158,8 +191,7 @@ def cut_segment(input_path: str, start: float, end: float,
     ]
 
     print(
-        f"Cutting {start:g}s -> {end:g}s ({duration:g}s), "
-        f"reframe={'on' if reframe else 'off'}, fit={fit}, "
+        f"Cutting {start:g}s -> {end:g}s ({duration:g}s), {layout_desc}, "
         f"captions={'on' if captions else 'off'}, "
         f"encoding {TARGET_W}x{TARGET_H} h264_nvenc ...",
         flush=True,
@@ -189,6 +221,13 @@ def main():
     ap.add_argument("--output", default=None, help="explicit output file path (overrides --output-dir)")
     ap.add_argument("--reframe", action="store_true",
                     help="face-tracking dynamic crop that follows the speaker (overrides --fit)")
+    ap.add_argument("--layout", choices=["split"], default=None,
+                    help="split = facecam on top, gameplay on bottom (streamer style)")
+    ap.add_argument("--facecam", default=None,
+                    help="facecam region for --layout split: 'x,y,w,h' (pixels or fractions) "
+                         "or a corner (top-left/tr/bottom-right/...); omit to auto-detect")
+    ap.add_argument("--facecam-frac", type=float, default=0.4,
+                    help="top share of the frame for the facecam in split layout (default 0.4)")
     ap.add_argument("--captions", action="store_true",
                     help="burn TikTok-style captions in (needs --transcript for word timestamps)")
     ap.add_argument("--transcript", default=None,
@@ -210,7 +249,8 @@ def main():
         out = cut_segment(args.input, args.start, args.end, args.fit,
                           args.output_dir, args.output,
                           captions=args.captions, words=words, style=style,
-                          reframe=args.reframe)
+                          reframe=args.reframe, layout=args.layout,
+                          facecam=args.facecam, facecam_frac=args.facecam_frac)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

@@ -154,7 +154,8 @@ def _clips_from_log(log_lines: list, clips_dir: str) -> list:
 
 
 def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
-             start: str = "", end: str = ""):
+             start: str = "", end: str = "", split: bool = False,
+             facecam: str = ""):
     """Run main.py as a subprocess, streaming its output into JOB['log']."""
     args = [sys.executable, "main.py", "--input", input_value, "--n", str(n)]
     if suggest:
@@ -163,6 +164,10 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
         args += ["--start", start]
     if end:
         args += ["--end", end]
+    if split:
+        args.append("--split")
+        if facecam:
+            args += ["--facecam", facecam]
     JOB["log"].append("$ " + " ".join(args[1:]))
     try:
         proc = subprocess.Popen(
@@ -187,15 +192,17 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
 
 
 def start_job(input_value: str, n: int, suggest: bool, clips_dir: str,
-              start: str = "", end: str = "") -> bool:
+              start: str = "", end: str = "", split: bool = False,
+              facecam: str = "") -> bool:
     """Start a clip job if none is running. Returns False if one already is."""
     with _JOB_LOCK:
         if JOB["status"] == "running":
             return False
         JOB.update(status="running", input=input_value, n=n, log=[], clips=[])
-    threading.Thread(target=_run_job,
-                     args=(input_value, n, suggest, clips_dir, start, end),
-                     daemon=True).start()
+    threading.Thread(
+        target=_run_job,
+        args=(input_value, n, suggest, clips_dir, start, end, split, facecam),
+        daemon=True).start()
     return True
 
 
@@ -329,6 +336,11 @@ def render_page(clips_dir: str) -> bytes:
         <input type="text" id="end" class="time" placeholder="to (e.g. 12:30)"></label>
       <span class="hint" style="margin:0">optional — leave blank for the whole video; transcribes just this window so a long video is fast</span>
     </div>
+    <div class="row" style="margin-top:10px">
+      <label class="opt"><input type="checkbox" id="split"> facecam split (cam on top, gameplay on bottom)</label>
+      <input type="text" id="facecam" class="time" style="width:220px" placeholder="facecam: auto (or x,y,w,h / corner)" disabled>
+      <span class="hint" style="margin:0">for streamer clips; auto-detects the facecam, or set a corner (bottom-left) / pixels</span>
+    </div>
     <div class="hint">Runs transcribe → score → reframe → caption locally, then lets you pick the best clips below. A URL is downloaded first (yt-dlp). Only clip content you have the rights to.</div>
     <div class="job" id="job" hidden>
       <div class="jobhead"><span id="spin" class="spinner"></span><span id="jobstatus"></span></div>
@@ -416,11 +428,13 @@ go.onclick = async () => {{
   logEl.textContent = ''; $('#results').innerHTML = '';
   const res = await fetch('/clip', {{ method:'POST', headers:{{'Content-Type':'application/json'}},
     body: JSON.stringify({{ input, n: +$('#n').value || 5, suggest: $('#suggest').checked,
-      start: $('#start').value.trim(), end: $('#end').value.trim() }}) }});
+      start: $('#start').value.trim(), end: $('#end').value.trim(),
+      split: $('#split').checked, facecam: $('#facecam').value.trim() }}) }});
   if (res.status === 409) {{ statusEl.textContent = 'A job is already running.'; return; }}
   timer = setInterval(poll, 1000); poll();
 }};
 $('#inp').addEventListener('keydown', e => {{ if (e.key === 'Enter') go.click(); }});
+$('#split').addEventListener('change', e => {{ $('#facecam').disabled = !e.target.checked; }});
 
 // Restore an in-progress or finished job if the page is reloaded.
 (async () => {{
@@ -492,8 +506,10 @@ class ClipHandler(BaseHTTPRequestHandler):
             n = 5
         start = str(data.get("start", "")).strip()
         end = str(data.get("end", "")).strip()
+        split = bool(data.get("split"))
+        facecam = str(data.get("facecam", "")).strip()
         ok = start_job(input_value, n, bool(data.get("suggest")),
-                       self.server.clips_dir, start, end)
+                       self.server.clips_dir, start, end, split, facecam)
         if not ok:
             self._send(409, "application/json", b'{"error":"a job is already running"}')
         else:

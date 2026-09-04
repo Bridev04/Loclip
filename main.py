@@ -86,7 +86,9 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  transcript_path: str = None, captions: bool = True,
                  reframe: bool = True, suggest: bool = False,
                  energy_weight: float = DEFAULT_ENERGY_WEIGHT,
-                 start: float = None, end: float = None) -> list:
+                 start: float = None, end: float = None,
+                 layout: str = None, facecam: str = None,
+                 facecam_frac: float = 0.4) -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
@@ -151,8 +153,10 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
     style = load_style() if captions else None
     text_by_id = {c["id"]: c["text"] for c in candidates}
 
+    crop_desc = "split(facecam/gameplay)" if layout == "split" else \
+                ("reframe" if reframe else "static")
     print(f"\n== Cutting top {len(top)} clips "
-          f"(reframe={'on' if reframe else 'off'}, "
+          f"(crop={crop_desc}, "
           f"captions={'on' if captions else 'off'}, "
           f"suggest={'on' if suggest else 'off'}) ==", flush=True)
     stem = _safe_stem(local_path)
@@ -162,7 +166,8 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                     f"_{r['start']:g}-{r['end']:g}.mp4")
         out = cut_segment(local_path, start=r["start"], end=r["end"], fit=fit,
                           out_path=out_path, captions=captions, words=words,
-                          style=style, reframe=reframe)
+                          style=style, reframe=reframe, layout=layout,
+                          facecam=facecam, facecam_frac=facecam_frac)
         outs.append(out)
         if suggest:
             _write_suggestion(out, text_by_id.get(r["id"], ""))
@@ -205,6 +210,13 @@ def main():
                     help="face-track the speaker when cropping to 9:16 (default on)")
     ap.add_argument("--no-reframe", dest="reframe", action="store_false",
                     help="use a static center crop instead of face tracking")
+    ap.add_argument("--split", dest="layout", action="store_const", const="split", default=None,
+                    help="streamer layout: facecam on top, gameplay on bottom (overrides reframe)")
+    ap.add_argument("--facecam", default=None,
+                    help="facecam region for --split: 'x,y,w,h' (pixels or fractions) or a "
+                         "corner (top-left/tr/bottom-left/br/...); omit to auto-detect")
+    ap.add_argument("--facecam-frac", type=float, default=0.4,
+                    help="top share of the frame for the facecam with --split (default 0.4)")
     ap.add_argument("--captions", dest="captions", action="store_true", default=True,
                     help="burn TikTok-style captions into each clip (default on)")
     ap.add_argument("--no-captions", dest="captions", action="store_false",
@@ -265,7 +277,8 @@ def main():
                 outs = run_pipeline(inp, args.n, args.fit, args.model,
                                     args.min, args.max, args.overlap, transcript,
                                     args.captions, args.reframe, args.suggest,
-                                    args.energy_weight, args.start, args.end)
+                                    args.energy_weight, args.start, args.end,
+                                    args.layout, args.facecam, args.facecam_frac)
             all_outs.extend(outs)
         except Exception as e:
             msg = f"{inp}: {type(e).__name__}: {e}"

@@ -172,6 +172,43 @@ tracking and use the static crop. **Known limitation:** on hard scene cuts the
 crop slides to the new speaker over ~1s rather than jumping instantly — a
 deliberate trade for smoothness; scene-cut-aware snapping is a future refinement.
 
+### Facecam split layout (streamer: facecam on top, gameplay on bottom)
+For streamer/gameplay clips, `--split` builds a vertical frame that stacks the
+**facecam on top** and the **gameplay on the bottom**, instead of a single
+cropped frame. The facecam region is found automatically (it's wherever faces
+consistently appear — the detector reuses Phase 6's YuNet, picks the biggest
+face cluster, and fits a 16:9 box around it), or you set it explicitly.
+
+```bash
+# whole pipeline, split layout, facecam auto-detected:
+venv\Scripts\python.exe main.py --input path\to\stream.mp4 --n 5 --split
+
+# pin the facecam (a multi-cam stream, or to keep it consistent across clips):
+venv\Scripts\python.exe main.py --input path\to\stream.mp4 --n 5 --split --facecam bottom-left
+venv\Scripts\python.exe main.py --input path\to\stream.mp4 --n 5 --split --facecam 0,380,570,320
+```
+
+- `--facecam` accepts a **corner** (`top-left` / `tr` / `bottom-left` / `br` / …),
+  **pixels** `x,y,w,h`, or **fractions** of the frame `x,y,w,h` when all ≤ 1.
+  Omit it to auto-detect. On a multi-cam stream auto-detect grabs the largest
+  (closest) face, which can differ clip to clip — pin `--facecam` for a
+  consistent cam.
+- `--facecam-frac` sets the top share (default `0.4` = facecam 40% / gameplay 60%).
+- Split overrides `--reframe`/`--fit`. If no facecam is found (or detection
+  fails), it falls back to the static center crop. Captions still burn in over
+  the finished split frame.
+
+Eyeball one window straight from `cut.py` (no scoring, encodes a real clip):
+
+```bash
+venv\Scripts\python.exe cut.py --input path\to\stream.mp4 --start 1450 --end 1460 --layout split --output output\split_test.mp4
+# force a specific cam:
+venv\Scripts\python.exe cut.py --input path\to\stream.mp4 --start 1450 --end 1460 --layout split --facecam bottom-left --output output\split_test.mp4
+```
+
+In the web UI, tick **facecam split** and (optionally) type a corner or pixels
+in the field beside it.
+
 ### Phase 7 — caption burn-in (TikTok/Reels style)
 `captions.py` turns the word timestamps in `transcript.json` into an ASS
 subtitle file — one or two words on screen at a time, big and centered, with
@@ -252,6 +289,9 @@ is transcribed).
 | `--dumb` | — | plumbing slice: transcribe then cut the first 45s (no scoring) |
 | `--suggest` | off | write a title/description/hashtags `.txt` per clip (Claude) |
 | `--reframe` / `--no-reframe` | on | face-track the speaker vs. static center crop |
+| `--split` | off | streamer layout: facecam on top, gameplay on bottom (overrides reframe) |
+| `--facecam` | auto | facecam region for `--split`: corner, `x,y,w,h` pixels, or fractions |
+| `--facecam-frac` | 0.4 | top share of the frame for the facecam with `--split` |
 | `--captions` / `--no-captions` | on | burn TikTok-style captions in vs. skip |
 | `--fit cover\|contain` | cover | static-crop mode (ignored when reframe is on) |
 | `--model` | `claude-haiku-4-5` | Claude model id for scoring |
@@ -323,6 +363,11 @@ venv\Scripts\python.exe serve.py
   transcribed, so a long video (a 2-hour stream, say) is fast instead of having
   to transcribe the whole thing. Leave both blank for the entire video. The
   clips are still cut at their true positions in the full source.
+- **facecam split** (optional) produces the streamer layout — the facecam on
+  top, the gameplay on the bottom — instead of a single cropped frame. The
+  facecam is auto-detected (the biggest/most-prominent face region); the field
+  beside the checkbox overrides it with a corner (`bottom-left`, `top-right`, …)
+  or exact pixels/fractions (`x,y,w,h`). See "Facecam split layout" below.
 - When it finishes, the new clips appear under **Pick your clips** with a
   checkbox on each — tick the ones you want and **Download selected**, or grab
   them individually. Reload to fold them into the gallery below.

@@ -277,6 +277,175 @@ def build_reframe_vf(video_path, start, end, target_w, target_h,
     return vf
 
 
+# --- Facecam split layout (streamer facecam on top, gameplay on bottom) ------
+#
+# A separate 9:16 layout: crop the streamer's facecam and stack it ABOVE the
+# gameplay. The facecam region is either given explicitly (--facecam) or found
+# automatically -- the facecam is wherever faces consistently appear, so we
+# reuse the YuNet detector, take the biggest face cluster, and fit a 16:9 box
+# around it. Multi-cam streams have several faces; auto-detect grabs the largest
+# (closest) one, and --facecam overrides it when you want a specific cam.
+
+CORNERS = {
+    "top-left": (True, True), "tl": (True, True),
+    "top-right": (False, True), "tr": (False, True),
+    "bottom-left": (True, False), "bl": (True, False),
+    "bottom-right": (False, False), "br": (False, False),
+}
+
+
+def _probe_wh(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open {video_path}")
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    return W, H
+
+
+def _clamp_rect(x, y, w, h, W, H):
+    """Round to ints and clamp a rect fully inside a W x H frame."""
+    w = int(max(2, min(round(w), W)))
+    h = int(max(2, min(round(h), H)))
+    x = int(min(max(0, round(x)), W - w))
+    y = int(min(max(0, round(y)), H - h))
+    return (x, y, w, h)
+
+
+def _detect_face_boxes(video_path, start, end, cfg):
+    """Sample the largest accepted face box per frame across [start, end].
+
+    Returns (boxes, W, H, n_samples) where each box is (cx, cy, w, h) in source
+    pixels. Unlike detect_track (which keeps only center-x for panning), this
+    keeps full boxes so we can size a facecam crop around them."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"could not open {video_path}")
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    det = _make_detector(W, H, cfg["score_threshold"])
+    min_w = cfg["min_face_frac"] * W
+
+    sample_dt = 1.0 / cfg["sample_fps"]
+    cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000.0)
+    next_t = start
+    boxes, n = [], 0
+    while True:
+        if not cap.grab():
+            break
+        t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+        if t > end + 1e-3:
+            break
+        if t + 1e-6 < next_t:
+            continue
+        ok, frame = cap.retrieve()
+        if not ok:
+            break
+        n += 1
+        _, faces = det.detect(frame)
+        best, best_area = None, 0.0
+        for f in (faces if faces is not None else []):
+            x, y, w, h = float(f[0]), float(f[1]), float(f[2]), float(f[3])
+            if w < min_w:
+                continue
+            area = w * h
+            if area > best_area:
+                best_area, best = area, (x + w / 2.0, y + h / 2.0, w, h)
+        if best is not None:
+            boxes.append(best)
+        next_t += sample_dt
+    cap.release()
+    return boxes, W, H, n
+
+
+def detect_facecam_rect(video_path, start, end, cfg, scale_k=3.0, aspect=16 / 9):
+    """Auto-locate the main facecam as a rect (x, y, w, h), or None.
+
+    Picks the biggest face (the closest / most prominent cam on a multi-cam
+    stream), gathers nearby detections for a stable median center + size, and
+    fits a 16:9 box `scale_k`x the face width around it."""
+    boxes, W, H, nsamp = _detect_face_boxes(video_path, start, end, cfg)
+    if len(boxes) < max(3, cfg["min_valid_frac"] * max(1, nsamp)):
+        return None
+    arr = np.asarray(boxes, dtype=float)  # columns: cx, cy, w, h
+    seed = arr[int(np.argmax(arr[:, 2] * arr[:, 3]))]
+    near = arr[np.hypot(arr[:, 0] - seed[0], arr[:, 1] - seed[1]) < 0.15 * W]
+    if len(near) == 0:
+        near = arr
+    cx, cy, fw = (float(np.median(near[:, 0])), float(np.median(near[:, 1])),
+                  float(np.median(near[:, 2])))
+    cam_w = scale_k * fw
+    cam_h = cam_w / aspect
+    return _clamp_rect(cx - cam_w / 2.0, cy - cam_h / 2.0, cam_w, cam_h, W, H)
+
+
+def resolve_facecam_rect(spec, video_path):
+    """Parse an explicit --facecam spec into a rect (x, y, w, h).
+
+    Accepts: `x,y,w,h` in pixels; the same as fractions of the frame when all
+    four are <= 1; or a corner name (top-left / tr / bottom-right / ...)."""
+    W, H = _probe_wh(video_path)
+    s = str(spec).strip().lower()
+    if "," in s:
+        try:
+            parts = [float(p) for p in s.split(",")]
+        except ValueError:
+            raise ValueError(f"bad --facecam {spec!r}: expected numbers 'x,y,w,h'")
+        if len(parts) != 4:
+            raise ValueError(f"--facecam needs 4 values 'x,y,w,h', got {spec!r}")
+        x, y, w, h = parts
+        if max(parts) <= 1.0:  # fractions of the frame
+            x, w, y, h = x * W, w * W, y * H, h * H
+        return _clamp_rect(x, y, w, h, W, H)
+    key = s.replace("_", "-")
+    if key in CORNERS:
+        left, top = CORNERS[key]
+        cam_w = round(0.42 * W)
+        cam_h = round(cam_w * 9 / 16)
+        x = 0 if left else W - cam_w
+        y = 0 if top else H - cam_h
+        return _clamp_rect(x, y, cam_w, cam_h, W, H)
+    raise ValueError(
+        f"unrecognized --facecam {spec!r}; use 'x,y,w,h' (pixels or fractions) "
+        f"or a corner: {', '.join(sorted(CORNERS))}")
+
+
+def build_split_filtergraph(video_path, start, end, target_w, target_h,
+                            facecam=None, facecam_frac=0.4, overrides=None):
+    """Build a filter_complex that stacks facecam (top) over gameplay (bottom).
+
+    Returns (graph, out_label, rect) or None when no facecam is available (auto
+    found none and no explicit --facecam) -- the caller then falls back. The
+    facecam is scaled to cover the top `facecam_frac` of the frame; the full
+    source (gameplay) covers the rest. Both are cover-cropped, like `fit=cover`."""
+    cfg = _cfg(overrides)
+    if facecam:
+        rect = resolve_facecam_rect(facecam, video_path)
+    else:
+        rect = detect_facecam_rect(video_path, start, end, cfg)
+    if rect is None:
+        return None
+    fx, fy, fw, fh = rect
+
+    frac = min(0.9, max(0.1, facecam_frac))
+    h_top = int(round(target_h * frac))
+    h_top -= h_top % 2                     # keep both halves even for yuv420p
+    h_top = max(2, min(target_h - 2, h_top))
+    h_bot = target_h - h_top
+
+    graph = (
+        f"[0:v]split=2[fc][gp];"
+        f"[fc]crop={fw}:{fh}:{fx}:{fy},"
+        f"scale={target_w}:{h_top}:force_original_aspect_ratio=increase,"
+        f"crop={target_w}:{h_top},setsar=1[top];"
+        f"[gp]scale={target_w}:{h_bot}:force_original_aspect_ratio=increase,"
+        f"crop={target_w}:{h_bot},setsar=1[bot];"
+        f"[top][bot]vstack=inputs=2[v]"
+    )
+    return graph, "[v]", rect
+
+
 def _summary(video_path, start, end, cfg):
     times, xs, W, H = detect_track(video_path, start, end, cfg)
     valid = ~np.isnan(xs)
