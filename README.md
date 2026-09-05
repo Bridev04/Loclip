@@ -307,6 +307,7 @@ is transcribed).
 | `--no-cache` | on | reuse cached transcripts for the same input/window (on by default) |
 | `--captions` / `--no-captions` | on | burn TikTok-style captions in vs. skip |
 | `--no-loudnorm` | on | audio loudness normalization to ~-14 LUFS (on by default) |
+| `--tighten` | off | cut silent gaps/pauses inside each clip (uses word timestamps; captions re-synced) |
 | `--fit cover\|contain` | cover | static-crop mode (ignored when reframe is on) |
 | `--model` | `claude-haiku-4-5` | first-pass scorer that shortlists every candidate |
 | `--rank-model` | `claude-sonnet-5` | re-ranks the shortlist (two-stage); same as `--model` disables |
@@ -383,6 +384,10 @@ ffmpeg/whisper/yt-dlp children.
   tick **caption suggestions** for the `--suggest` metadata.
 - **focus** (optional) steers scoring toward what you want this run — "funny
   reactions", "hot takes", "practical tips" — the same as `--vibe`.
+- **tighten (cut silences)** removes dead air and long pauses inside each clip
+  for a punchier edit (`--tighten`). It uses the word timestamps to keep speech
+  and drop the gaps, re-times audio+video together, and re-syncs the captions
+  onto the shortened timeline. Reframe/facecam-split still apply.
 - **only clip from / to** (optional) restricts the run to a time window of the
   source — enter `5:00` / `12:30` (or plain seconds). Only that window is
   transcribed, so a long video (a 2-hour stream, say) is fast instead of having

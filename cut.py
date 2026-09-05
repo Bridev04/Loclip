@@ -81,7 +81,8 @@ def cut_segment(input_path: str, start: float, end: float,
                 words: list = None, style: dict = None,
                 reframe: bool = False, reframe_cfg: dict = None,
                 layout: str = None, facecam: str = None,
-                facecam_frac: float = 0.4, loudnorm: bool = True) -> str:
+                facecam_frac: float = 0.4, loudnorm: bool = True,
+                tighten: bool = False, tighten_cfg: dict = None) -> str:
     """Resolve input, cut [start, end], reframe to 9:16, encode to out_path.
 
     When layout="split", the clip becomes a streamer-style vertical: the facecam
@@ -158,16 +159,42 @@ def cut_segment(input_path: str, start: float, end: float,
         if base_vf is None:
             base_vf = FILTERS[fit]
 
+    # Silence/filler tightening: keep the speech spans, drop the rest with
+    # select/aselect (re-timed via setpts) so pauses vanish and a/v stay in sync.
+    # Needs word timestamps; captions are remapped onto the shortened timeline.
+    tighten_on = False
+    tighten_af = ""
+    cap_words, cap_end = words, end
+    if tighten and words:
+        from tighten import keep_spans, kept_duration, select_expr, remap_words
+        spans = keep_spans(words, start, end, **(tighten_cfg or {}))
+        kept = kept_duration(spans)
+        if len(spans) > 1 and (duration - kept) > 0.4:
+            tighten_on = True
+            expr = select_expr(spans, start)
+            vsel = f"select='{expr}',setpts=N/FRAME_RATE/TB"
+            tighten_af = f"aselect='{expr}',asetpts=N/SR/TB"
+            if complex_graph is not None:
+                complex_graph = f"{complex_graph};{final_label}{vsel}[vtt]"
+                final_label = "[vtt]"
+            else:
+                base_vf = f"{base_vf},{vsel}"
+            cap_words = remap_words(words, spans, start)
+            cap_end = start + kept
+            layout_desc += f" +tighten(-{duration - kept:.1f}s)"
+    elif tighten and not words:
+        print("Tighten: no word timestamps -> skipping.", flush=True)
+
     ass_path = None
     if captions:
-        if not words:
+        if not cap_words:
             raise ValueError("captions=True requires `words` (word timestamps)")
         if style is None:
             style = load_style()
         # Temp .ass on the same drive as the output; removed after the encode.
         fd, ass_path = tempfile.mkstemp(suffix=".ass", dir=os.path.dirname(out_path) or ".")
         os.close(fd)
-        write_ass(words, start, end, style, ass_path)
+        write_ass(cap_words, start, cap_end, style, ass_path)
         ass_filter = f"ass={_ass_filter_path(ass_path)}"
         if complex_graph is not None:
             complex_graph = f"{complex_graph};{final_label}{ass_filter}[vout]"
@@ -175,18 +202,26 @@ def cut_segment(input_path: str, start: float, end: float,
         else:
             base_vf = f"{base_vf},{ass_filter}"
 
-    # -ss before -i is a fast seek; because we re-encode, ffmpeg still lands on
-    # an accurate frame at `start`. -t is the clip length (end - start).
-    cmd = [ffmpeg, "-y", "-ss", f"{start}", "-i", local_path, "-t", f"{duration}"]
+    # -ss/-t BEFORE -i: fast input seek AND cap how much input is read to the
+    # clip window. -t must be an INPUT limit (not output): with silence-tightening
+    # the output is shorter than the window, so an output -t would never trigger
+    # and ffmpeg would read the rest of the file. We re-encode, so the seek is
+    # still frame-accurate at `start`.
+    cmd = [ffmpeg, "-y", "-ss", f"{start}", "-t", f"{duration}", "-i", local_path]
     if complex_graph is not None:
         # -map the composited video and the source audio (if any).
         cmd += ["-filter_complex", complex_graph, "-map", final_label, "-map", "0:a?"]
     else:
         cmd += ["-vf", base_vf]
-    # Normalize loudness to the social-standard ~-14 LUFS so clips don't swing
-    # between quiet and blaring. Single-pass loudnorm is plenty for short clips.
+    # Audio filter chain: drop the same silent spans (keeps a/v in sync), then
+    # normalize loudness to the social-standard ~-14 LUFS.
+    af = []
+    if tighten_af:
+        af.append(tighten_af)
     if loudnorm:
-        cmd += ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
+        af.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+    if af:
+        cmd += ["-af", ",".join(af)]
     cmd += [
         "-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0",
         "-pix_fmt", "yuv420p",
@@ -237,6 +272,8 @@ def main():
                     help="top share of the frame for the facecam in split layout (default 0.4)")
     ap.add_argument("--no-loudnorm", dest="loudnorm", action="store_false",
                     help="skip audio loudness normalization (on by default, ~-14 LUFS)")
+    ap.add_argument("--tighten", action="store_true",
+                    help="cut silent gaps/pauses using word timestamps (needs --transcript)")
     ap.add_argument("--captions", action="store_true",
                     help="burn TikTok-style captions in (needs --transcript for word timestamps)")
     ap.add_argument("--transcript", default=None,
@@ -246,13 +283,15 @@ def main():
 
     words = None
     style = None
-    if args.captions:
+    if args.captions or args.tighten:
         if not args.transcript:
-            print("ERROR: --captions requires --transcript with word timestamps.", file=sys.stderr)
+            print("ERROR: --captions/--tighten require --transcript with word timestamps.",
+                  file=sys.stderr)
             sys.exit(2)
         with open(args.transcript, encoding="utf-8") as f:
             words = json.load(f)["words"]
-        style = load_style(args.style)
+        if args.captions:
+            style = load_style(args.style)
 
     try:
         out = cut_segment(args.input, args.start, args.end, args.fit,
@@ -260,7 +299,7 @@ def main():
                           captions=args.captions, words=words, style=style,
                           reframe=args.reframe, layout=args.layout,
                           facecam=args.facecam, facecam_frac=args.facecam_frac,
-                          loudnorm=args.loudnorm)
+                          loudnorm=args.loudnorm, tighten=args.tighten)
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         sys.exit(1)

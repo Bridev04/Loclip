@@ -349,7 +349,7 @@ def _clips_from_log(log_lines: list, clips_dir: str) -> list:
 def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
              start: str = "", end: str = "", split: bool = False,
              facecam: str = "", manual: bool = False, reframe: bool = False,
-             vibe: str = ""):
+             vibe: str = "", tighten: bool = False):
     """Run the pipeline (or a plain exact cut) as a subprocess, streaming output.
 
     manual=True cuts exactly [start, end] via cut.py (no transcription/scoring)
@@ -377,6 +377,8 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
                 args += ["--facecam", facecam]
         if vibe:
             args += ["--vibe", vibe]
+        if tighten:
+            args.append("--tighten")
     JOB["log"].append("$ " + " ".join(args[1:]))
     try:
         proc = subprocess.Popen(
@@ -409,7 +411,7 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
 def start_job(input_value: str, n: int, suggest: bool, clips_dir: str,
               start: str = "", end: str = "", split: bool = False,
               facecam: str = "", manual: bool = False, reframe: bool = False,
-              vibe: str = "") -> bool:
+              vibe: str = "", tighten: bool = False) -> bool:
     """Start a clip job if none is running. Returns False if one already is."""
     with _JOB_LOCK:
         if JOB["status"] == "running":
@@ -419,7 +421,7 @@ def start_job(input_value: str, n: int, suggest: bool, clips_dir: str,
     threading.Thread(
         target=_run_job,
         args=(input_value, n, suggest, clips_dir, start, end, split, facecam,
-              manual, reframe, vibe),
+              manual, reframe, vibe, tighten),
         daemon=True).start()
     return True
 
@@ -592,6 +594,7 @@ def render_page(clips_dir: str) -> bytes:
       <input type="text" id="inp" placeholder="Video URL (YouTube…) or a local file path on this machine">
       <label class="opt">clips <input type="number" id="n" min="1" max="20" value="5"></label>
       <label class="opt"><input type="checkbox" id="suggest"> caption suggestions</label>
+      <label class="opt"><input type="checkbox" id="tighten"> tighten (cut silences)</label>
       <button id="go">Clip</button>
     </div>
     <div class="row" style="margin-top:10px">
@@ -706,7 +709,8 @@ go.onclick = async () => {{
     body: JSON.stringify({{ input, n: +$('#n').value || 5, suggest: $('#suggest').checked,
       start: $('#start').value.trim(), end: $('#end').value.trim(),
       split: $('#split').checked, facecam: $('#facecam').value.trim(),
-      manual: $('#manual').checked, vibe: $('#vibe').value.trim() }}) }});
+      manual: $('#manual').checked, vibe: $('#vibe').value.trim(),
+      tighten: $('#tighten').checked }}) }});
   if (res.status === 409) {{ statusEl.textContent = 'A job is already running.'; spin.style.display='none'; go.disabled=false; return; }}
   if (!res.ok) {{ const j = await res.json().catch(()=>({{}})); statusEl.textContent = j.error || 'Request failed.'; statusEl.style.color='var(--err)'; spin.style.display='none'; go.disabled=false; return; }}
   timer = setInterval(poll, 1000); poll();
@@ -1149,9 +1153,10 @@ class ClipHandler(BaseHTTPRequestHandler):
             self._send(400, "application/json", b'{"error":"exact cut needs from and to"}')
             return
         vibe = str(data.get("vibe", "")).strip()[:200]
+        tighten = bool(data.get("tighten"))
         ok = start_job(input_value, n, bool(data.get("suggest")),
                        self.server.clips_dir, start, end, split, facecam, manual,
-                       reframe, vibe)
+                       reframe, vibe, tighten)
         if not ok:
             self._send(409, "application/json", b'{"error":"a job is already running"}')
         else:

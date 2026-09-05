@@ -95,7 +95,7 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  facecam_frac: float = 0.4, batch_size: int = BATCH_SIZE,
                  loudnorm: bool = True, rank_model: str = DEFAULT_RANK_MODEL,
                  refine_top: int = DEFAULT_REFINE_TOP, cache: bool = True,
-                 vibe: str = "") -> list:
+                 vibe: str = "", tighten: bool = False) -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
@@ -161,7 +161,7 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
         print(f"  #{i}  score {r['score']:>3}{extra}  "
               f"{r['start']:>7.2f}-{r['end']:>7.2f}s  {r['reason']}", flush=True)
 
-    words = result["words"] if captions else None
+    words = result.get("words")  # needed for captions and/or silence tightening
     style = load_style() if captions else None
     text_by_id = {c["id"]: c["text"] for c in candidates}
 
@@ -180,7 +180,7 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                           out_path=out_path, captions=captions, words=words,
                           style=style, reframe=reframe, layout=layout,
                           facecam=facecam, facecam_frac=facecam_frac,
-                          loudnorm=loudnorm)
+                          loudnorm=loudnorm, tighten=tighten)
         outs.append(out)
         _write_clip_meta(out, i, r)
         if suggest:
@@ -261,6 +261,8 @@ def main():
                          f"GPU out-of-memory, 1 = sequential)")
     ap.add_argument("--no-loudnorm", dest="loudnorm", action="store_false",
                     help="skip audio loudness normalization (on by default, ~-14 LUFS)")
+    ap.add_argument("--tighten", action="store_true",
+                    help="cut silent gaps/pauses inside each clip for a punchier edit")
     ap.add_argument("--no-cache", dest="cache", action="store_false",
                     help="force a fresh transcription instead of reusing the transcripts/ cache")
     ap.add_argument("--captions", dest="captions", action="store_true", default=True,
@@ -327,7 +329,7 @@ def main():
                                     args.layout, args.facecam, args.facecam_frac,
                                     args.batch_size, args.loudnorm,
                                     args.rank_model, args.refine_top, args.cache,
-                                    args.vibe)
+                                    args.vibe, args.tighten)
             all_outs.extend(outs)
         except Exception as e:
             msg = f"{inp}: {type(e).__name__}: {e}"
