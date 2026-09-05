@@ -60,6 +60,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # --- Job state (single-user, so one job at a time) -------------------------
 _JOB_LOCK = threading.Lock()
 JOB = {"status": "idle", "input": "", "n": 0, "log": [], "clips": []}
+# The running subprocess, so /cancel can stop a clip in progress.
+_CURRENT = {"proc": None, "cancel": False}
+
+
+def _kill_proc(proc):
+    """Kill a subprocess and its children (ffmpeg/whisper/yt-dlp) if running."""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True)
+        else:
+            proc.terminate()
+    except Exception:
+        pass
 
 # --- Trimmer: source videos, timeline previews, URL download ---------------
 _INFO_CACHE = {}
@@ -364,6 +380,7 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
             args, cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, encoding="utf-8", errors="replace",
         )
+        _CURRENT["proc"] = proc
         for line in proc.stdout:
             JOB["log"].append(line.rstrip("\n"))
         proc.wait()
@@ -371,13 +388,18 @@ def _run_job(input_value: str, n: int, suggest: bool, clips_dir: str,
     except Exception as e:  # spawning itself failed
         JOB["log"].append(f"ERROR: {type(e).__name__}: {e}")
         JOB["status"] = "error"
+        _CURRENT["proc"] = None
         return
 
+    _CURRENT["proc"] = None
     JOB["clips"] = _clips_from_log(JOB["log"], clips_dir)
-    if rc == 0:
+    if _CURRENT["cancel"]:
+        JOB["log"].append("[cancelled]")
+        JOB["status"] = "cancelled"
+    elif rc == 0:
         JOB["status"] = "done"
     else:
-        JOB["log"].append(f"[main.py exited with code {rc}]")
+        JOB["log"].append(f"[exited with code {rc}]")
         JOB["status"] = "error"
 
 
@@ -389,6 +411,7 @@ def start_job(input_value: str, n: int, suggest: bool, clips_dir: str,
         if JOB["status"] == "running":
             return False
         JOB.update(status="running", input=input_value, n=n, log=[], clips=[])
+        _CURRENT["cancel"] = False
     threading.Thread(
         target=_run_job,
         args=(input_value, n, suggest, clips_dir, start, end, split, facecam,
@@ -475,6 +498,8 @@ def render_page(clips_dir: str) -> bytes:
   button {{ padding:10px 18px; font-size:14px; font-weight:600; border:0; border-radius:8px;
     background:var(--accent); color:#0b0d11; cursor:pointer; }}
   button:disabled {{ opacity:.5; cursor:default; }}
+  .cancelbtn {{ margin-left:auto; padding:5px 12px; font-size:12px; background:#2a1d22;
+    color:var(--err); border:1px solid #4a2b31; }}
   .hint {{ color:var(--dim); font-size:12px; margin-top:8px; }}
   .job {{ margin-top:16px; }}
   .jobhead {{ display:flex; align-items:center; gap:10px; font-weight:600; }}
@@ -544,7 +569,7 @@ def render_page(clips_dir: str) -> bytes:
     </div>
     <div class="hint">Runs transcribe → score → reframe → caption locally, then lets you pick the best clips below. A URL is downloaded first (yt-dlp). Only clip content you have the rights to.</div>
     <div class="job" id="job" hidden>
-      <div class="jobhead"><span id="spin" class="spinner"></span><span id="jobstatus"></span></div>
+      <div class="jobhead"><span id="spin" class="spinner"></span><span id="jobstatus"></span><button id="cancel" class="cancelbtn" hidden>■ Cancel</button></div>
       <pre class="log" id="log"></pre>
       <div id="results"></div>
     </div>
@@ -615,13 +640,16 @@ async function poll() {{
   const s = await fetch('/status').then(r => r.json());
   logEl.textContent = s.log;
   logEl.scrollTop = logEl.scrollHeight;
-  if (s.status === 'running') {{ statusEl.textContent = 'Clipping “' + s.input + '” …'; return; }}
+  if (s.status === 'running') {{ statusEl.textContent = 'Clipping “' + s.input + '” …'; $('#cancel').hidden = false; return; }}
   clearInterval(timer); timer = null;
   spin.style.display = 'none';
-  go.disabled = false;
+  go.disabled = false; $('#cancel').hidden = true;
   if (s.status === 'error') {{ statusEl.textContent = 'Failed — see log.'; statusEl.style.color = 'var(--err)'; }}
+  else if (s.status === 'cancelled') {{ statusEl.textContent = 'Cancelled.'; statusEl.style.color = 'var(--err)'; renderResults(s.clips); }}
   else {{ statusEl.textContent = 'Done — ' + s.clips.length + ' clip(s).'; renderResults(s.clips); }}
 }}
+$('#cancel').onclick = async () => {{ $('#cancel').disabled = true; statusEl.textContent = 'Cancelling…';
+  await fetch('/cancel', {{ method:'POST' }}).catch(()=>{{}}); $('#cancel').disabled = false; }};
 
 go.onclick = async () => {{
   const input = $('#inp').value.trim();
@@ -712,19 +740,20 @@ _EDITOR_HTML = r"""<!doctype html>
 <body>
 <header>
   <h1>Local Clipper — Trimmer</h1>
-  <a href="/">‹ Clips gallery</a>
+  <a href="/clips">Auto-clip &amp; gallery ›</a>
 </header>
 <main>
   <div class="panel">
     <div class="row">
-      <select id="src"><option value="">— pick a downloaded video —</option></select>
-      <button id="load">Load</button>
+      <input type="text" id="url" placeholder="Paste a video URL (YouTube…) or a local file path — it loads here to trim">
+      <button id="get">Load video</button>
     </div>
     <div class="row" style="margin-top:10px">
-      <input type="text" id="url" placeholder="…or paste a video URL / local path to download">
-      <button id="get" class="ghost">Download</button>
+      <span class="hint">or open one you already downloaded:</span>
+      <select id="src"><option value="">— downloaded videos —</option></select>
+      <button id="load" class="ghost">Open</button>
     </div>
-    <div class="hint" id="srchint" style="margin-top:8px">Pick a video you've already downloaded, or paste a link to add one. Trimming happens on your machine; nothing is uploaded.</div>
+    <div class="hint" id="srchint" style="margin-top:8px">Paste a link and it downloads, then appears below to trim. Everything stays on your machine; nothing is uploaded.</div>
     <pre class="log" id="dllog" hidden></pre>
   </div>
 
@@ -754,6 +783,7 @@ _EDITOR_HTML = r"""<!doctype html>
       <label class="opt"><input type="checkbox" id="split"> facecam split</label>
       <input type="text" id="facecam" class="time" style="width:200px" placeholder="facecam: auto / corner" disabled>
       <button id="cut">Cut selection ▸</button>
+      <button id="cancel" class="ghost" hidden>■ Cancel</button>
       <span class="hint" id="cutstatus"></span>
     </div>
     <div class="hint" style="margin-top:8px">Captions come from the auto-pipeline (they need the transcript); a hand-trimmed cut is exported without them. Loudness is normalized automatically.</div>
@@ -845,6 +875,9 @@ document.addEventListener('keydown', e=>{ if (['INPUT','SELECT'].includes(e.targ
 
 $('#src').addEventListener('change', e=>{ if (e.target.value) selectSource(e.target.value); });
 $('#load').onclick = ()=>{ const v=$('#src').value; if (v) selectSource(v); };
+$('#url').addEventListener('keydown', e=>{ if (e.key==='Enter') $('#get').click(); });
+$('#cancel').onclick = async ()=>{ $('#cancel').disabled=true; $('#cutstatus').textContent='Cancelling…';
+  await fetch('/cancel',{method:'POST'}).catch(()=>{}); $('#cancel').disabled=false; };
 
 $('#get').onclick = async ()=>{
   const input = $('#url').value.trim(); if (!input) return;
@@ -863,7 +896,8 @@ $('#get').onclick = async ()=>{
 
 $('#cut').onclick = async ()=>{
   if (!name) return;
-  $('#cut').disabled = true; $('#cutstatus').textContent = 'Cutting…'; $('#cutstatus').style.color='';
+  $('#cut').disabled = true; $('#cancel').hidden = false;
+  $('#cutstatus').textContent = 'Cutting…'; $('#cutstatus').style.color='';
   $('#cutlog').hidden = false; $('#cutlog').textContent=''; $('#result').innerHTML='';
   const body = { input: 'media/'+name, manual: true, start: String(inT.toFixed(2)), end: String(outT.toFixed(2)),
     split: $('#split').checked, facecam: $('#facecam').value.trim() };
@@ -871,18 +905,19 @@ $('#cut').onclick = async ()=>{
   // for face-track we route through cut.py's --reframe by piggybacking on split=false + reframe flag:
   body.reframe = $('#reframe').checked;
   const res = await fetch('/clip', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  if (res.status===409){ $('#cutstatus').textContent='A job is already running.'; $('#cut').disabled=false; return; }
-  if (!res.ok){ const j=await res.json().catch(()=>({})); $('#cutstatus').textContent=j.error||'Failed.'; $('#cutstatus').style.color='var(--err)'; $('#cut').disabled=false; return; }
+  if (res.status===409){ $('#cutstatus').textContent='A job is already running.'; $('#cut').disabled=false; $('#cancel').hidden=true; return; }
+  if (!res.ok){ const j=await res.json().catch(()=>({})); $('#cutstatus').textContent=j.error||'Failed.'; $('#cutstatus').style.color='var(--err)'; $('#cut').disabled=false; $('#cancel').hidden=true; return; }
   clearInterval(poller);
   poller = setInterval(async ()=>{
     const s = await fetch('/status').then(r=>r.json());
     $('#cutlog').textContent = s.log; $('#cutlog').scrollTop = $('#cutlog').scrollHeight;
-    if (s.status!=='running'){ clearInterval(poller); $('#cut').disabled=false;
+    if (s.status!=='running'){ clearInterval(poller); $('#cut').disabled=false; $('#cancel').hidden=true;
       if (s.status==='error'){ $('#cutstatus').textContent='Failed — see log.'; $('#cutstatus').style.color='var(--err)'; }
+      else if (s.status==='cancelled'){ $('#cutstatus').textContent='Cancelled.'; $('#cutstatus').style.color='var(--err)'; }
       else { const c = s.clips[s.clips.length-1];
         $('#cutstatus').textContent = 'Done!';
         if (c) $('#result').innerHTML = `<video controls src="/clips/${encodeURIComponent(c.name)}"></video>`
-          + `<div class="hint" style="margin-top:6px">Saved as <b>${c.name}</b> — also in the <a href="/">gallery</a>. <a class="dl" href="/clips/${encodeURIComponent(c.name)}" download>download</a></div>`;
+          + `<div class="hint" style="margin-top:6px">Saved as <b>${c.name}</b> — also in the <a href="/clips">gallery</a>. <a class="dl" href="/clips/${encodeURIComponent(c.name)}" download>download</a></div>`;
       }
     }
   }, 1000);
@@ -917,10 +952,10 @@ class ClipHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
-        if path in ("/", "/index.html"):
-            self._send(200, "text/html; charset=utf-8", render_page(self.server.clips_dir))
-        elif path == "/editor":
+        if path in ("/", "/index.html", "/editor"):
             self._send(200, "text/html; charset=utf-8", render_editor())
+        elif path in ("/clips", "/gallery"):
+            self._send(200, "text/html; charset=utf-8", render_page(self.server.clips_dir))
         elif path == "/status":
             snap = {"status": JOB["status"], "input": JOB["input"],
                     "log": "\n".join(JOB["log"]),
@@ -964,6 +999,15 @@ class ClipHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = urllib.parse.urlparse(self.path).path
+        if route == "/cancel":
+            proc = _CURRENT.get("proc")
+            if JOB["status"] == "running" and proc is not None:
+                _CURRENT["cancel"] = True
+                _kill_proc(proc)
+                self._send_json({"status": "cancelling"})
+            else:
+                self._send_json({"status": "idle"})
+            return
         if route not in ("/clip", "/download"):
             self.send_error(404, "Not found")
             return
