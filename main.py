@@ -94,7 +94,8 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
                  layout: str = None, facecam: str = None,
                  facecam_frac: float = 0.4, batch_size: int = BATCH_SIZE,
                  loudnorm: bool = True, rank_model: str = DEFAULT_RANK_MODEL,
-                 refine_top: int = DEFAULT_REFINE_TOP, cache: bool = True) -> list:
+                 refine_top: int = DEFAULT_REFINE_TOP, cache: bool = True,
+                 vibe: str = "") -> list:
     """Full pipeline: transcribe -> segment -> score -> cut top N clips.
 
     If transcript_path is given, that transcript is reused instead of
@@ -129,8 +130,10 @@ def run_pipeline(input_path: str, n: int, fit: str = "cover",
 
     stage2 = refine_top > 0 and rank_model and rank_model != model
     print(f"\n== Scoring with {model}"
-          f"{f' + {rank_model} (top {refine_top})' if stage2 else ''} ==", flush=True)
-    ranked = score_segments_2stage(candidates, model, rank_model, refine_top)
+          f"{f' + {rank_model} (top {refine_top})' if stage2 else ''}"
+          f"{f' [focus: {vibe}]' if vibe else ''} ==", flush=True)
+    ranked = score_segments_2stage(candidates, model, rank_model, refine_top,
+                                   vibe=vibe)
 
     # Phase 5: blend a local audio-energy signal into the ranking BEFORE overlap
     # suppression, so a genuinely punchy beat (laughs, emphatic delivery) can
@@ -233,6 +236,9 @@ def main():
     ap.add_argument("--refine-top", type=int, default=DEFAULT_REFINE_TOP,
                     help=f"how many top candidates the rank-model re-scores "
                          f"(default {DEFAULT_REFINE_TOP}; 0 = single-stage, shortlist only)")
+    ap.add_argument("--vibe", default="",
+                    help="steer scoring toward what you want this run "
+                         "(e.g. \"funny reactions\", \"practical tips\", \"hot takes\")")
     ap.add_argument("--min", type=float, default=None, help="min candidate window length (s)")
     ap.add_argument("--max", type=float, default=None, help="max candidate window length (s)")
     ap.add_argument("--overlap", type=float, default=0.5,
@@ -320,7 +326,8 @@ def main():
                                     args.energy_weight, args.start, args.end,
                                     args.layout, args.facecam, args.facecam_frac,
                                     args.batch_size, args.loudnorm,
-                                    args.rank_model, args.refine_top, args.cache)
+                                    args.rank_model, args.refine_top, args.cache,
+                                    args.vibe)
             all_outs.extend(outs)
         except Exception as e:
             msg = f"{inp}: {type(e).__name__}: {e}"

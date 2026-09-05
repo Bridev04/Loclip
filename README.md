@@ -311,6 +311,7 @@ is transcribed).
 | `--model` | `claude-haiku-4-5` | first-pass scorer that shortlists every candidate |
 | `--rank-model` | `claude-sonnet-5` | re-ranks the shortlist (two-stage); same as `--model` disables |
 | `--refine-top` | 10 | how many top candidates the rank-model re-scores (`0` = single-stage) |
+| `--vibe` | — | steer scoring toward what you want (e.g. `"funny reactions"`, `"hot takes"`) |
 | `--min` / `--max` | 20 / 90 | candidate window length bounds (s) |
 | `--overlap` | 0.5 | max overlap between chosen clips (`1.0` disables dedup) |
 | `--energy-weight` | 0.3 | audio-energy share when re-ranking (`0` = pure LLM order); see Phase 5 |

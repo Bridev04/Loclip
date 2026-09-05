@@ -68,12 +68,16 @@ def _extract_json_array(text: str) -> list:
 
 
 def score_segments(candidates: list, model: str = DEFAULT_MODEL,
-                   prompt_path: str = PROMPT_PATH) -> list:
+                   prompt_path: str = PROMPT_PATH, vibe: str = "") -> list:
     """Score candidates with Claude and return them ranked best-first.
 
     Each returned item is {id, start, end, score, reason}. start/end are taken
     from OUR candidate (matched by id), not from the model's echo, so a clip is
     always cut at the boundary we chose even if the model rewrites the numbers.
+
+    `vibe` (optional) is a per-run steer appended to the prompt, e.g. "funny
+    reactions" or "practical tips" -- it biases scoring toward what you want
+    without editing prompts/score.txt.
     """
     if not candidates:
         return []
@@ -87,6 +91,11 @@ def score_segments(candidates: list, model: str = DEFAULT_MODEL,
         )
 
     system = load_prompt(prompt_path)
+    if vibe and vibe.strip():
+        system += ("\n\n## Focus for THIS run\n"
+                   f"The user is especially looking for: {vibe.strip()}\n"
+                   "Give higher scores to segments that fit that focus, while "
+                   "still penalizing rambling or context-dependent ones.")
     payload = json.dumps(
         [{"id": c["id"], "start": c["start"], "end": c["end"], "text": c["text"]}
          for c in candidates],
@@ -142,7 +151,7 @@ def score_segments(candidates: list, model: str = DEFAULT_MODEL,
 def score_segments_2stage(candidates: list, shortlist_model: str = DEFAULT_MODEL,
                           rank_model: str = DEFAULT_RANK_MODEL,
                           refine_top: int = DEFAULT_REFINE_TOP,
-                          prompt_path: str = PROMPT_PATH) -> list:
+                          prompt_path: str = PROMPT_PATH, vibe: str = "") -> list:
     """Two-stage scoring: shortlist with a cheap model, re-rank the best with a
     stronger one.
 
@@ -152,7 +161,7 @@ def score_segments_2stage(candidates: list, shortlist_model: str = DEFAULT_MODEL
     shortlist ranking is returned unchanged so a run never dies on stage two.
     Set refine_top<=0 (or the same model for both) to get plain single-stage.
     """
-    ranked = score_segments(candidates, shortlist_model, prompt_path)
+    ranked = score_segments(candidates, shortlist_model, prompt_path, vibe)
     if refine_top <= 0 or rank_model == shortlist_model or len(ranked) <= 1:
         return ranked
 
@@ -163,7 +172,7 @@ def score_segments_2stage(candidates: list, shortlist_model: str = DEFAULT_MODEL
 
     print(f"  refining top {len(shortlist)} with {rank_model} ...", flush=True)
     try:
-        refined = score_segments(shortlist, rank_model, prompt_path)
+        refined = score_segments(shortlist, rank_model, prompt_path, vibe)
     except Exception as e:
         print(f"  WARNING: refine with {rank_model} failed ({type(e).__name__}: {e}); "
               f"keeping {shortlist_model} order.", flush=True)
