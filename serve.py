@@ -446,11 +446,17 @@ def _card_html(c: dict) -> str:
     if c["suggest"]:
         suggest = ('<details class="suggest"><summary>suggested caption</summary>'
                    f'<pre>{html.escape(c["suggest"])}</pre></details>')
-    return f"""<div class="card">
+    nm = html.escape(c['name'])
+    return f"""<div class="card" data-name="{nm}">
+      <div class="cardctl">
+        <input type="checkbox" class="pick" title="select">
+        <button class="star" title="favorite">☆</button>
+        <button class="del" title="delete">✕</button>
+      </div>
       <video controls preload="metadata" playsinline src="{src}"></video>
       <div class="info">
         <div class="badges">{''.join(badges)}</div>
-        <div class="fname" title="{html.escape(c['name'])}">{html.escape(c['name'])}</div>
+        <div class="fname" title="{nm}">{nm}</div>
         <div class="meta">{' &middot; '.join(meta)}</div>
         {reason}
         {suggest}
@@ -465,7 +471,25 @@ def render_page(clips_dir: str) -> bytes:
     count = f"{len(clips)} clip{'s' if len(clips) != 1 else ''}"
 
     if clips:
-        library = f'<div class="grid">{"".join(_card_html(c) for c in clips)}</div>'
+        groups = {}
+        for c in clips:
+            stem = re.split(r"_rank\d+|_[\d.]+-[\d.]+", c["name"])[0] or "clips"
+            groups.setdefault(stem, []).append(c)
+        blocks = []
+        for stem, items in groups.items():
+            cards = "".join(_card_html(c) for c in items)
+            blocks.append(
+                f'<h3 class="group">{html.escape(stem)} '
+                f'<span class="gcount">{len(items)}</span></h3>'
+                f'<div class="grid">{cards}</div>')
+        toolbar = (
+            '<div class="libbar">'
+            '<button id="selall" class="ghost">Select all</button>'
+            '<button id="dlsel">Download selected</button>'
+            '<button id="delsel" class="dangbtn">Delete selected</button>'
+            '<label class="opt"><input type="checkbox" id="favonly"> favorites only</label>'
+            '<span class="hint" id="selcount"></span></div>')
+        library = toolbar + "".join(blocks)
     else:
         library = '<div class="empty">No clips yet — make some above.</div>'
 
@@ -521,8 +545,20 @@ def render_page(clips_dir: str) -> bytes:
   .card {{ background:var(--card); border:1px solid var(--line); border-radius:12px;
     overflow:hidden; display:flex; flex-direction:column; position:relative; }}
   .card.sel {{ outline:2px solid var(--accent); }}
+  .card.fav {{ outline:2px solid #ffb020; }}
   .card .pick {{ position:absolute; top:10px; right:10px; width:20px; height:20px; z-index:1;
     accent-color:var(--accent); cursor:pointer; }}
+  .cardctl {{ position:absolute; top:8px; right:8px; z-index:2; display:flex; gap:6px; align-items:center; }}
+  .cardctl .pick {{ position:static; top:auto; right:auto; width:18px; height:18px; }}
+  .cardctl .star, .cardctl .del {{ width:24px; height:24px; padding:0; border:0; border-radius:6px;
+    cursor:pointer; font-size:14px; line-height:24px; background:rgba(11,13,17,.72); color:var(--text); }}
+  .cardctl .star.on {{ color:#ffb020; }}
+  .cardctl .del {{ color:var(--err); }}
+  .group {{ font-size:13px; margin:22px 0 10px; font-family:ui-monospace,Consolas,monospace;
+    border-bottom:1px solid var(--line); padding-bottom:6px; }}
+  .gcount {{ color:var(--dim); font-weight:400; }}
+  .libbar {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin:6px 0 4px; }}
+  .dangbtn {{ background:#2a1d22; color:var(--err); border:1px solid #4a2b31; }}
   video {{ width:100%; aspect-ratio:9/16; background:#000; display:block; }}
   .info {{ padding:12px; display:flex; flex-direction:column; gap:7px; }}
   .badges {{ display:flex; gap:6px; }}
@@ -689,6 +725,46 @@ $('#split').addEventListener('change', e => {{ $('#facecam').disabled = !e.targe
   else if (s.status === 'error') {{ statusEl.textContent = 'Failed — see log.'; statusEl.style.color = 'var(--err)'; }}
   else {{ statusEl.textContent = 'Done — ' + s.clips.length + ' clip(s).'; renderResults(s.clips); }}
 }})();
+
+// --- Gallery management: favorites (localStorage), delete, batch download ---
+const FAV_KEY = 'loclip_favs';
+function favs() {{ try {{ return new Set(JSON.parse(localStorage.getItem(FAV_KEY)||'[]')); }} catch (e) {{ return new Set(); }} }}
+function saveFavs(s) {{ try {{ localStorage.setItem(FAV_KEY, JSON.stringify([...s])); }} catch (e) {{}} }}
+function applyFavs() {{ const f = favs();
+  document.querySelectorAll('.card').forEach(card => {{ const n = card.dataset.name; const on = f.has(n);
+    card.classList.toggle('fav', on); const star = card.querySelector('.star');
+    if (star) {{ star.classList.toggle('on', on); star.textContent = on ? '★' : '☆'; }} }}); }}
+function selCount() {{ const n = document.querySelectorAll('.card .pick:checked').length;
+  const el = document.getElementById('selcount'); if (el) el.textContent = n ? n + ' selected' : ''; }}
+async function delClip(card) {{ const n = card.dataset.name;
+  const r = await fetch('/delete', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{name:n}})}});
+  if (r.ok) {{ card.remove(); return true; }} return false; }}
+
+document.addEventListener('click', async (e) => {{
+  const card = e.target.closest && e.target.closest('.card'); if (!card) return;
+  if (e.target.classList.contains('star')) {{ const n = card.dataset.name; const f = favs();
+    if (f.has(n)) f.delete(n); else f.add(n); saveFavs(f); applyFavs(); }}
+  else if (e.target.classList.contains('del')) {{
+    if (confirm('Delete this clip? ' + card.dataset.name)) {{ if (!await delClip(card)) alert('Delete failed.'); }} }}
+}});
+document.addEventListener('change', e => {{ if (e.target.classList.contains('pick')) selCount(); }});
+
+const _sa = document.getElementById('selall');
+if (_sa) _sa.onclick = () => {{ const ps = [...document.querySelectorAll('.card')].filter(c=>c.style.display!=='none').map(c=>c.querySelector('.pick'));
+  const allOn = ps.every(p=>p.checked); ps.forEach(p=>p.checked=!allOn); selCount(); }};
+const _dl = document.getElementById('dlsel');
+if (_dl) _dl.onclick = () => {{ const picks=[...document.querySelectorAll('.card .pick:checked')];
+  picks.forEach((p,i)=>{{ const a=p.closest('.card').querySelector('a.dl'); if(a) setTimeout(()=>a.click(), i*400); }}); }};
+const _de = document.getElementById('delsel');
+if (_de) _de.onclick = async () => {{ const cards=[...document.querySelectorAll('.card')].filter(c=>c.querySelector('.pick').checked);
+  if (!cards.length || !confirm('Delete '+cards.length+' selected clip(s)?')) return;
+  for (const c of cards) await delClip(c); selCount(); }};
+const _fo = document.getElementById('favonly');
+if (_fo) _fo.onchange = () => {{ const f=favs();
+  document.querySelectorAll('.card').forEach(c=>{{ c.style.display = (!_fo.checked || f.has(c.dataset.name)) ? '' : 'none'; }});
+  document.querySelectorAll('.grid').forEach(g=>{{ const vis=[...g.querySelectorAll('.card')].some(c=>c.style.display!=='none');
+    const h=g.previousElementSibling; if(h&&h.classList.contains('group')) h.style.display=vis?'':'none'; g.style.display=vis?'':'none'; }}); }};
+applyFavs();
 </script>
 </body>
 </html>"""
@@ -1017,7 +1093,7 @@ class ClipHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"status": "idle"})
             return
-        if route not in ("/clip", "/download"):
+        if route not in ("/clip", "/download", "/delete"):
             self.send_error(404, "Not found")
             return
         try:
@@ -1025,6 +1101,24 @@ class ClipHandler(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             self._send(400, "application/json", b'{"error":"bad request"}')
+            return
+
+        if route == "/delete":
+            nm = os.path.basename(str(data.get("name", "")))
+            base = os.path.abspath(self.server.clips_dir)
+            full = os.path.abspath(os.path.join(base, nm))
+            if not nm or os.path.commonpath([base, full]) != base or not os.path.isfile(full):
+                self._send_json({"error": "not found"}, 404)
+                return
+            stem = os.path.splitext(full)[0]
+            ok = True
+            for p in (full, stem + ".txt", stem + ".meta.json"):
+                try:
+                    if os.path.isfile(p):
+                        os.remove(p)
+                except OSError:
+                    ok = False
+            self._send_json({"status": "deleted" if ok else "partial"})
             return
 
         if route == "/download":

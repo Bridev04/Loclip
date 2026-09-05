@@ -381,6 +381,8 @@ ffmpeg/whisper/yt-dlp children.
   reframe → caption) as a subprocess and streams its output to the page. A URL
   is downloaded first (yt-dlp). Set how many clips with the **clips** field and
   tick **caption suggestions** for the `--suggest` metadata.
+- **focus** (optional) steers scoring toward what you want this run — "funny
+  reactions", "hot takes", "practical tips" — the same as `--vibe`.
 - **only clip from / to** (optional) restricts the run to a time window of the
   source — enter `5:00` / `12:30` (or plain seconds). Only that window is
   transcribed, so a long video (a 2-hour stream, say) is fast instead of having
@@ -398,6 +400,11 @@ ffmpeg/whisper/yt-dlp children.
   range, an **energy** badge, and the scorer's **reason** for picking it (from a
   `<clip>.meta.json` sidecar the pipeline writes), plus the `--suggest` caption
   when the sibling `.txt` exists.
+- The gallery is **grouped by source video** and each card has controls: **★
+  favorite** (kept in your browser), **✕ delete** (removes the clip + its
+  sidecars), and a **select** box. The toolbar adds **Select all**, **Download
+  selected**, **Delete selected**, and a **favorites only** filter — so a
+  growing `/output` stays manageable.
 - **exact cut (no scoring)** — tick it and fill from/to to just grab that exact
   window as a 9:16 clip (via `cut.py`, no transcription or scoring). Combine with
   facecam split if you like.
